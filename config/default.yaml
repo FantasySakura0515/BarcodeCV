@@ -1,0 +1,78 @@
+system:
+  mode: "continuous"              # "single", "continuous", "calibration"
+  scan_interval_seconds: 2.0
+  save_images: true
+  image_output_dir: "./output/images"
+  log_level: "INFO"
+  log_file: "./logs/barcodecv.log"
+
+cameras:
+  global:
+    type: "picamera"
+    camera_num: 0
+    width: 1920
+    height: 1080
+    role: "detection"
+  local:
+    type: "picamera"
+    camera_num: 1
+    width: 1920
+    height: 1080
+    role: "decoding"
+
+# Library-based scanning: pylibdmtx and zxing-cpp can both detect AND decode
+# DataMatrix codes directly from the full image. No YOLO model needed.
+decoding:
+  primary_decoder: "pylibdmtx"    # "pylibdmtx" or "zxing"
+  fallback_decoder: "zxing"       # null to disable fallback
+  merge_results: true             # merge results from both scanners
+  pylibdmtx:
+    timeout_ms: 5000              # higher timeout = finds more codes
+    # max_count: null             # null = find all codes (no limit)
+    shrink: 1                     # 1 = full resolution, 2+ = faster but may miss small codes
+    threshold: 50
+    min_edge: 10
+    max_edge: 100
+  zxing:
+    formats: ["DataMatrix"]
+  preprocessing:
+    sharpen: true
+    clahe: true
+    clahe_clip_limit: 2.0
+    to_grayscale: false
+
+database:
+  path: "./data/barcodecv.db"
+  wal_mode: true
+
+calibration:
+  known_distance_mm: null
+  sweep_distances_mm: [50, 75, 100, 125, 150, 175, 200, 250, 300]
+  focus_metric: "laplacian"
+
+box_detection:
+  enabled: true
+  min_area: 5000          # minimum contour area (px²) — filters out noise
+  max_area: 500000        # maximum contour area
+  canny_threshold1: 50
+  canny_threshold2: 150
+  morph_kernel_size: 5    # dilation kernel to connect broken edges
+  approx_epsilon: 0.02    # polygon approximation precision (fraction of perimeter)
+  aspect_ratio_min: 0.3   # width/height ratio filter
+  aspect_ratio_max: 3.0
+
+spatial_matching:
+  overlap_threshold: 0.3  # minimum IoU to count a DataMatrix as inside a box
+
+# --- OPTIONAL: YOLO-based detection (only needed if library scanning is insufficient) ---
+# Uncomment and configure if you want to train a custom YOLO model for detection.
+# This is useful when codes are very small/distant and pylibdmtx/zxing can't find them.
+#
+# detection:
+#   model_path: "./models/datamatrix_best.pt"
+#   model_format: "pt"            # "pt", "ncnn", "onnx"
+#   confidence_threshold: 0.5
+#   iou_threshold: 0.45
+#   imgsz: 640
+#   device: "cpu"
+#   max_detections: 50

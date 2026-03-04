@@ -1,0 +1,13 @@
+# Raspberry Pi 5 deployment overrides
+system:
+  log_level: "INFO"
+
+detection:
+  model_path: "./models/datamatrix_ncnn_model"
+  model_format: "ncnn"
+  device: "cpu"
+
+decoding:
+  pylibdmtx:
+    timeout_ms: 2000
+    shrink: 2

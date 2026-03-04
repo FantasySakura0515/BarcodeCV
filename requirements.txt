@@ -1,0 +1,23 @@
+# Core
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+
+# YOLO Detection
+ultralytics>=8.3.0
+
+# DataMatrix Decoding
+pylibdmtx>=0.1.10
+zxing-cpp>=2.2.0
+
+# Configuration
+PyYAML>=6.0
+
+# Training (install on training machine only)
+# albumentations>=1.3.0
+# treepoem>=3.0.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-mock>=3.12.0
