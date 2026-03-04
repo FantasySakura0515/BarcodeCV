@@ -9,8 +9,6 @@ sudo apt install -y \
     libdmtx0t64 \
     python3-picamera2 \
     python3-libcamera \
-    python3-opencv \
-    libopencv-dev \
     v4l-utils
 
 echo "=== System dependencies installed ==="
