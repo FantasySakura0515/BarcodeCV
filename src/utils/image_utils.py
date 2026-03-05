@@ -30,13 +30,15 @@ def resize_with_padding(
     return canvas
 
 
-def enhance_contrast(image: np.ndarray, clip_limit: float = 2.0) -> np.ndarray:
+def enhance_contrast(
+    image: np.ndarray, clip_limit: float = 2.0, tile_grid_size: int = 8
+) -> np.ndarray:
     """Apply CLAHE contrast enhancement."""
     if len(image.shape) == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         gray = image
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_grid_size, tile_grid_size))
     return clahe.apply(gray)
 
 

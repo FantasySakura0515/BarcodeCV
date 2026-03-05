@@ -6,6 +6,7 @@ def preprocess_for_detection(
     image: np.ndarray,
     apply_clahe: bool = True,
     clahe_clip_limit: float = 2.0,
+    clahe_tile_grid_size: int = 8,
 ) -> np.ndarray:
     """Preprocess an image before YOLO detection.
 
@@ -17,7 +18,8 @@ def preprocess_for_detection(
     if apply_clahe:
         lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB)
         l_channel, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=(8, 8))
+        tile = (clahe_tile_grid_size, clahe_tile_grid_size)
+        clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=tile)
         l_channel = clahe.apply(l_channel)
         result = cv2.merge([l_channel, a, b])
         result = cv2.cvtColor(result, cv2.COLOR_LAB2BGR)

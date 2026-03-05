@@ -164,6 +164,8 @@ def _run_calibration(config: dict):
             decoder=_ScannerAdapter(scanner),
             focus_scorer=scorer,
             metric=metric,
+            samples_per_distance=cal_cfg.get("samples_per_distance", 5),
+            success_threshold=cal_cfg.get("success_threshold", 0.5),
         )
 
         logger.info("Starting calibration sweep with distances: %s", distances)

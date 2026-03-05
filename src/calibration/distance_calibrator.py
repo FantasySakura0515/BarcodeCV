@@ -30,12 +30,14 @@ class DistanceCalibrator:
         focus_scorer: FocusScorer | None = None,
         metric: str = "laplacian",
         samples_per_distance: int = 5,
+        success_threshold: float = 0.5,
     ):
         self._camera = camera
         self._decoder = decoder
         self._scorer = focus_scorer or FocusScorer()
         self._metric = metric
         self._samples = samples_per_distance
+        self._success_threshold = success_threshold
 
     def run_sweep(self, distances_mm: list[float]) -> list[CalibrationPoint]:
         """Run calibration sweep. User manually positions camera at each distance.
@@ -72,7 +74,7 @@ class DistanceCalibrator:
             point = CalibrationPoint(
                 distance_mm=distance,
                 sharpness_score=avg_score,
-                decode_success=success_rate >= 0.5,
+                decode_success=success_rate >= self._success_threshold,
                 decode_time_ms=avg_decode_time,
             )
             results.append(point)

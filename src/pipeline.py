@@ -58,6 +58,7 @@ class ScanPipeline:
 
         self._save_images = config.get("system", {}).get("save_images", False)
         self._image_dir = config.get("system", {}).get("image_output_dir", "./output/images")
+        self._jpeg_quality = config.get("system", {}).get("jpeg_quality", 85)
         self._preprocess_cfg = config.get("decoding", {}).get("preprocessing", {})
 
     def run_single_scan(self) -> ScanSummary:
@@ -76,7 +77,12 @@ class ScanPipeline:
         # --- Global Phase ---
         logger.info("=== Global Phase: Scanning wide-angle frame ===")
         global_frame = self._cameras.capture_global()
-        global_image = preprocess_for_detection(global_frame.image)
+        det_pre_cfg = self._config.get("decoding", {}).get("preprocessing", {})
+        global_image = preprocess_for_detection(
+            global_frame.image,
+            clahe_clip_limit=det_pre_cfg.get("clahe_clip_limit", 2.0),
+            clahe_tile_grid_size=det_pre_cfg.get("clahe_tile_grid_size", 8),
+        )
 
         # Box detection on global frame
         boxes = []
@@ -201,7 +207,11 @@ class ScanPipeline:
         """Apply preprocessing to improve decoding quality."""
         cfg = self._preprocess_cfg
         if cfg.get("clahe", False):
-            image = enhance_contrast(image, cfg.get("clahe_clip_limit", 2.0))
+            image = enhance_contrast(
+                image,
+                cfg.get("clahe_clip_limit", 2.0),
+                cfg.get("clahe_tile_grid_size", 8),
+            )
             if len(image.shape) == 2:
                 image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         if cfg.get("sharpen", False):
@@ -261,5 +271,5 @@ class ScanPipeline:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{session_id}_{label}_{ts}.jpg"
         path = str(Path(self._image_dir) / filename)
-        cv2.imwrite(path, image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        cv2.imwrite(path, image, [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality])
         return path

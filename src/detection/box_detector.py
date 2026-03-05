@@ -140,6 +140,7 @@ class BoxDetector:
             canny_threshold1=cfg.get("canny_threshold1", 50),
             canny_threshold2=cfg.get("canny_threshold2", 150),
             morph_kernel_size=cfg.get("morph_kernel_size", 5),
+            blur_kernel_size=cfg.get("blur_kernel_size", 5),
             approx_epsilon=cfg.get("approx_epsilon", 0.02),
             aspect_ratio_min=cfg.get("aspect_ratio_min", 0.3),
             aspect_ratio_max=cfg.get("aspect_ratio_max", 3.0),
