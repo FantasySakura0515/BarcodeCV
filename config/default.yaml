@@ -60,14 +60,15 @@ calibration:
 
 box_detection:
   enabled: true
-  min_area: 5000          # minimum contour area (px²) — filters out noise
-  max_area: 500000        # maximum contour area
-  canny_threshold1: 50
-  canny_threshold2: 150
-  morph_kernel_size: 5    # dilation kernel to connect broken edges
+  min_area: 1500          # lower to keep distant/smaller boxes
+  max_area: 800000        # allow larger close-up boxes too
+  canny_threshold1: 35
+  canny_threshold2: 120
+  morph_kernel_size: 7    # stronger edge connection for broken / blurry borders
+  blur_kernel_size: 5     # Gaussian blur before multi-path contour extraction
   approx_epsilon: 0.02    # polygon approximation precision (fraction of perimeter)
-  aspect_ratio_min: 0.3   # width/height ratio filter
-  aspect_ratio_max: 3.0
+  aspect_ratio_min: 0.5   # use max(w,h)/min(w,h), so box-like rectangles stay near 1
+  aspect_ratio_max: 2.4
 
 spatial_matching:
   overlap_threshold: 0.3  # minimum IoU to count a DataMatrix as inside a box
