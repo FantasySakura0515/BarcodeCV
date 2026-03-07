@@ -155,7 +155,7 @@ class DetectionService:
                 dm_detections = detector.decode_bboxes(image, [box.bbox for box in boxes])
                 return self._merge_box_and_dm(boxes, dm_detections)
 
-            downscaled, scale = self._resize_for_fast_scan(image, target_width=1280)
+            downscaled, scale = self._resize_for_fast_scan(image, target_width=1920)
             dm_detections = detector.detect_and_decode(downscaled)
             return self._scale_dm_results(dm_detections, scale)
 

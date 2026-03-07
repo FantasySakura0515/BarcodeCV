@@ -13,6 +13,26 @@ from ..utils.image_utils import crop_region
 logger = logging.getLogger("barcodecv.opencv_datamatrix")
 
 
+def _build_fast_scanner_with_dynamsoft(config: dict, detector_cfg: dict):
+	"""Try to build a Dynamsoft-based scanner for fast mode. Returns None if unavailable."""
+	dynamo_cfg = config.get("dynamsoft", {})
+	if dynamo_cfg.get("enabled", True) is False:
+		return None
+	try:
+		from ..decoding.direct_scanner import DynamsoftScanner, CompositeScanner, ZxingScanner
+		license_key = dynamo_cfg.get("license_key", "DLS2eyJvcmdhbml6YXRpb25JRCI6IjIwMDAwMSJ9")
+		template = dynamo_cfg.get("fast_template", "speed_first")
+		dynamsoft = DynamsoftScanner(license_key=license_key, template=template)
+		# Use zxing as fallback in case Dynamsoft misses something
+		zxing = ZxingScanner(try_harder=False)
+		scanner = CompositeScanner(primary=dynamsoft, fallback=zxing, merge_results=True)
+		logger.info("Fast detector using Dynamsoft + zxing fallback")
+		return scanner
+	except Exception as exc:
+		logger.info("Dynamsoft unavailable for fast mode, falling back to zxing+pylibdmtx: %s", exc)
+		return None
+
+
 @dataclass
 class OpenCVDataMatrixResult:
 	content: str
@@ -75,7 +95,13 @@ class OpenCVDataMatrixDetector:
 		candidates = self._detect_candidates(image, max_area=max_area)
 		results: list[OpenCVDataMatrixResult] = []
 
+		# Time budget: fast mode gets 5s, batch mode gets 30s.
+		time_budget_s = 5.0 if self._max_roi_scan_variants <= 4 else 30.0
+
 		for bbox in candidates:
+			if (time.perf_counter() - start) > time_budget_s:
+				logger.info("ROI scan time budget exceeded after %.0fms, stopping early", (time.perf_counter() - start) * 1000)
+				break
 			x1, y1, x2, y2 = self._expand_bbox(bbox, image.shape)
 			roi = crop_region(image, (x1, y1, x2, y2))
 			decoded = self._scan_roi_variants(roi)
@@ -165,25 +191,34 @@ class OpenCVDataMatrixDetector:
 	def _scan_roi_variants(self, roi: np.ndarray) -> list:
 		"""Try progressively more aggressive preprocessing until a code is found.
 
-		Variants are ordered cheapest-first. `max_roi_scan_variants` caps how
-		many variants are attempted (use 1-2 for live/fast mode, 6+ for batch).
-		Includes blur-resistant variants (unsharp mask, bilateral, morphological).
+		Variants are ordered by effectiveness. For small ROIs (distant codes),
+		upscaled variants are prioritized since they are most impactful.
+		`max_roi_scan_variants` caps how many variants are attempted.
 		"""
-		variants: list = [
-			lambda: roi,
-			lambda: self._enhance_for_decode(roi),
-			lambda: self._unsharp_mask(roi),
-			lambda: self._invert_variant(roi),
-			lambda: self._bilateral_variant(roi),
-			lambda: self._invert_variant(self._enhance_for_decode(roi)),
-			lambda: self._morphological_sharpen(roi),
-		]
-		# Upscale variants — only useful if ROI is small
-		if min(roi.shape[:2]) < 160:
-			variants += [
+		is_small = min(roi.shape[:2]) < 200
+
+		if is_small:
+			# Small ROI (distant code): upscale first — most impactful
+			variants: list = [
 				lambda: self._resize_variant(roi, scale=2.0),
 				lambda: self._resize_variant(self._unsharp_mask(roi), scale=2.0),
 				lambda: self._resize_variant(self._enhance_for_decode(roi), scale=2.0),
+				lambda: roi,
+				lambda: self._enhance_for_decode(roi),
+				lambda: self._unsharp_mask(roi),
+				lambda: self._invert_variant(roi),
+				lambda: self._bilateral_variant(roi),
+				lambda: self._morphological_sharpen(roi),
+			]
+		else:
+			variants = [
+				lambda: roi,
+				lambda: self._enhance_for_decode(roi),
+				lambda: self._unsharp_mask(roi),
+				lambda: self._invert_variant(roi),
+				lambda: self._bilateral_variant(roi),
+				lambda: self._invert_variant(self._enhance_for_decode(roi)),
+				lambda: self._morphological_sharpen(roi),
 			]
 
 		for variant_fn in variants[: self._max_roi_scan_variants]:
@@ -450,22 +485,42 @@ class OpenCVDataMatrixDetector:
 		detector_cfg = config.get("opencv_datamatrix", {})
 
 		if fast:
-			# Build a fast scanner for live preview — balanced between speed and accuracy.
+			# Try Dynamsoft first — it handles detection+decoding in a single
+			# optimized pass and is far more accurate at distance/blur.
+			scanner = _build_fast_scanner_with_dynamsoft(config, detector_cfg)
+			if scanner is not None:
+				return OpenCVDataMatrixDetector(
+					scanner=scanner,
+					min_area=detector_cfg.get("min_area", 60),
+					max_area_ratio=detector_cfg.get("max_area_ratio", 0.3),
+					adaptive_block_size=detector_cfg.get("adaptive_block_size", 31),
+					adaptive_c=detector_cfg.get("adaptive_c", 8),
+					morph_kernel_size=detector_cfg.get("morph_kernel_size", 3),
+					blur_kernel_size=detector_cfg.get("blur_kernel_size", 5),
+					aspect_ratio_min=detector_cfg.get("aspect_ratio_min", 0.5),
+					aspect_ratio_max=detector_cfg.get("aspect_ratio_max", 2.0),
+					padding=detector_cfg.get("padding", 30),
+					max_candidates=0,
+					clahe_clip_limit=detector_cfg.get("clahe_clip_limit", 3.0),
+					fallback_full_image=True,
+					max_roi_scan_variants=1,
+					max_full_frame_scan_variants=1,
+				)
+
+			# Fallback: zxing + pylibdmtx when Dynamsoft is unavailable
 			dec_cfg = config.get("decoding", {})
 			dmtx_cfg = dec_cfg.get("pylibdmtx", {})
-			# Use config timeout or a generous default; 100ms was too tight on Pi.
-			fast_timeout = dmtx_cfg.get("fast_timeout_ms", dmtx_cfg.get("timeout_ms", 2000))
+			fast_timeout = min(dmtx_cfg.get("fast_timeout_ms", 1200), 1500)
 			pylibdmtx = PylibdmtxScanner(
 				timeout_ms=fast_timeout,
-				max_count=dmtx_cfg.get("max_count"),
+				max_count=5,
 				shrink=max(dmtx_cfg.get("shrink", 1), 1),
 				threshold=dmtx_cfg.get("threshold", 50),
 				min_edge=dmtx_cfg.get("min_edge", 8),
 				max_edge=dmtx_cfg.get("max_edge", 200),
 			)
-			zxing = ZxingScanner(try_harder=False)  # speed priority in live mode
-			# merge_results=False: only run zxing if pylibdmtx found nothing
-			scanner = CompositeScanner(primary=pylibdmtx, fallback=zxing, merge_results=False)
+			zxing = ZxingScanner(try_harder=True)
+			scanner = CompositeScanner(primary=zxing, fallback=pylibdmtx, merge_results=False)
 			return OpenCVDataMatrixDetector(
 				scanner=scanner,
 				min_area=detector_cfg.get("min_area", 60),
@@ -476,17 +531,51 @@ class OpenCVDataMatrixDetector:
 				blur_kernel_size=detector_cfg.get("blur_kernel_size", 5),
 				aspect_ratio_min=detector_cfg.get("aspect_ratio_min", 0.5),
 				aspect_ratio_max=detector_cfg.get("aspect_ratio_max", 2.0),
-				padding=detector_cfg.get("padding", 20),
-				max_candidates=detector_cfg.get("max_candidates", 120),
+				padding=detector_cfg.get("padding", 30),
+				max_candidates=60,
 				clahe_clip_limit=detector_cfg.get("clahe_clip_limit", 3.0),
 				fallback_full_image=True,
-				max_roi_scan_variants=5,        # original + enhanced + unsharp + inverted + bilateral
-				max_full_frame_scan_variants=6,  # original + enhanced + unsharp + bilateral + inverted + binary
+				max_roi_scan_variants=4,
+				max_full_frame_scan_variants=3,
 			)
 
 		# Full-quality scanner for batch/capture mode
+		# Try Dynamsoft (read_rate_first for max accuracy) with pylibdmtx+zxing merge
+		dynamo_cfg = config.get("dynamsoft", {})
 		dec_cfg = config.get("decoding", {})
 		dmtx_cfg = dec_cfg.get("pylibdmtx", {})
+		merge = dec_cfg.get("merge_results", True)
+
+		try:
+			if dynamo_cfg.get("enabled", True) is not False:
+				from ..decoding.direct_scanner import DynamsoftScanner
+				license_key = dynamo_cfg.get("license_key", "DLS2eyJvcmdhbml6YXRpb25JRCI6IjIwMDAwMSJ9")
+				batch_template = dynamo_cfg.get("batch_template", "read_rate_first")
+				dynamsoft = DynamsoftScanner(license_key=license_key, template=batch_template)
+				zxing = ZxingScanner(try_harder=True)
+				scanner = CompositeScanner(primary=dynamsoft, fallback=zxing, merge_results=True)
+				logger.info("Batch detector using Dynamsoft (read_rate_first) + zxing merge")
+				return OpenCVDataMatrixDetector(
+					scanner=scanner,
+					min_area=detector_cfg.get("min_area", 60),
+					max_area_ratio=detector_cfg.get("max_area_ratio", 0.3),
+					adaptive_block_size=detector_cfg.get("adaptive_block_size", 31),
+					adaptive_c=detector_cfg.get("adaptive_c", 8),
+					morph_kernel_size=detector_cfg.get("morph_kernel_size", 3),
+					blur_kernel_size=detector_cfg.get("blur_kernel_size", 5),
+					aspect_ratio_min=detector_cfg.get("aspect_ratio_min", 0.5),
+					aspect_ratio_max=detector_cfg.get("aspect_ratio_max", 2.0),
+					padding=detector_cfg.get("padding", 20),
+					max_candidates=detector_cfg.get("max_candidates", 120),
+					clahe_clip_limit=detector_cfg.get("clahe_clip_limit", 3.0),
+					fallback_full_image=True,
+					max_roi_scan_variants=2,
+					max_full_frame_scan_variants=2,
+				)
+		except Exception as exc:
+			logger.info("Dynamsoft unavailable for batch mode: %s", exc)
+
+		# Fallback: pylibdmtx + zxing
 		pylibdmtx = PylibdmtxScanner(
 			timeout_ms=dmtx_cfg.get("timeout_ms", 5000),
 			max_count=dmtx_cfg.get("max_count"),
@@ -496,7 +585,6 @@ class OpenCVDataMatrixDetector:
 			max_edge=dmtx_cfg.get("max_edge", 200),
 		)
 		zxing = ZxingScanner(try_harder=True)
-		merge = dec_cfg.get("merge_results", True)
 		scanner = CompositeScanner(primary=pylibdmtx, fallback=zxing, merge_results=merge)
 		return OpenCVDataMatrixDetector(
 			scanner=scanner,
@@ -512,6 +600,6 @@ class OpenCVDataMatrixDetector:
 			max_candidates=detector_cfg.get("max_candidates", 120),
 			clahe_clip_limit=detector_cfg.get("clahe_clip_limit", 3.0),
 			fallback_full_image=detector_cfg.get("fallback_full_image", True),
-			max_roi_scan_variants=6,          # try all preprocessing variants
-			max_full_frame_scan_variants=6,   # try all full-frame fallback variants
+			max_roi_scan_variants=6,
+			max_full_frame_scan_variants=6,
 		)

@@ -9,6 +9,7 @@ ultralytics>=8.3.0
 # DataMatrix Decoding
 pylibdmtx>=0.1.10
 zxing-cpp>=2.2.0
+dynamsoft-barcode-reader-bundle>=11.0.0
 
 # Configuration
 PyYAML>=6.0

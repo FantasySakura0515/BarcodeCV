@@ -217,6 +217,173 @@ class ZxingScanner:
         return "zxing-cpp"
 
 
+class DynamsoftScanner:
+    """Scan entire image for DataMatrix codes using Dynamsoft Barcode Reader.
+
+    Dynamsoft handles both detection and decoding in a single optimized pass,
+    making it significantly faster and more accurate than the pylibdmtx/zxing
+    pipeline — especially for distant or blurry codes.
+    """
+
+    _license_initialized = False
+    _cvr_instance: "CaptureVisionRouter | None" = None
+
+    def __init__(
+        self,
+        license_key: str = "DLS2eyJvcmdhbml6YXRpb25JRCI6IjIwMDAwMSJ9",
+        template: str = "speed_first",
+    ):
+        self._license_key = license_key
+        self._template_name = template
+        self._ensure_initialized()
+
+    def _ensure_initialized(self) -> None:
+        if DynamsoftScanner._cvr_instance is not None:
+            return
+        try:
+            from dynamsoft_barcode_reader_bundle import (
+                CaptureVisionRouter,
+                EnumBarcodeFormat,
+                EnumErrorCode,
+                EnumPresetTemplate,
+                LicenseManager,
+            )
+
+            if not DynamsoftScanner._license_initialized:
+                err, msg = LicenseManager.init_license(self._license_key)
+                if err != EnumErrorCode.EC_OK and err != EnumErrorCode.EC_LICENSE_WARNING:
+                    logger.warning("Dynamsoft license init failed: %s (code %d)", msg, err)
+                else:
+                    logger.info("Dynamsoft license initialized OK")
+                DynamsoftScanner._license_initialized = True
+
+            cvr = CaptureVisionRouter()
+
+            # Configure for DataMatrix-only scanning
+            template = self._resolve_template()
+            err, msg, settings = cvr.get_simplified_settings(template)
+            if err == EnumErrorCode.EC_OK:
+                settings.barcode_settings.barcode_format_ids = EnumBarcodeFormat.BF_DATAMATRIX
+                settings.barcode_settings.expected_barcodes_count = 0  # find all
+                cvr.update_settings(template, settings)
+
+            DynamsoftScanner._cvr_instance = cvr
+            logger.info("Dynamsoft CaptureVisionRouter initialized (template: %s)", self._template_name)
+        except ImportError:
+            logger.warning("dynamsoft_barcode_reader_bundle not installed, DynamsoftScanner unavailable")
+            raise
+        except Exception as exc:
+            logger.warning("Dynamsoft initialization failed: %s", exc)
+            raise
+
+    def _resolve_template(self) -> str:
+        from dynamsoft_barcode_reader_bundle import EnumPresetTemplate
+
+        templates = {
+            "speed_first": EnumPresetTemplate.PT_READ_BARCODES_SPEED_FIRST,
+            "read_rate_first": EnumPresetTemplate.PT_READ_BARCODES_READ_RATE_FIRST,
+            "default": EnumPresetTemplate.PT_READ_BARCODES,
+        }
+        return templates.get(self._template_name, EnumPresetTemplate.PT_READ_BARCODES_SPEED_FIRST)
+
+    def scan(self, image: np.ndarray) -> list[ScanResult]:
+        from dynamsoft_barcode_reader_bundle import (
+            EnumErrorCode,
+            EnumImagePixelFormat,
+            ImageData,
+        )
+
+        start = time.perf_counter()
+        cvr = DynamsoftScanner._cvr_instance
+        if cvr is None:
+            return [ScanResult(
+                content="", bbox=(0, 0, 0, 0), scanner_used="dynamsoft",
+                scan_time_ms=0, success=False, error_message="not initialized",
+            )]
+
+        try:
+            # Convert numpy BGR image to Dynamsoft ImageData
+            if len(image.shape) == 3:
+                pixel_fmt = EnumImagePixelFormat.IPF_BGR_888
+                img_bytes = image.tobytes()
+                stride = image.strides[0]
+            else:
+                pixel_fmt = EnumImagePixelFormat.IPF_GRAYSCALED
+                img_bytes = image.tobytes()
+                stride = image.strides[0]
+
+            image_data = ImageData(
+                img_bytes, image.shape[1], image.shape[0],
+                stride, pixel_fmt,
+            )
+
+            template = self._resolve_template()
+            result = cvr.capture(image_data, template)
+
+            elapsed = (time.perf_counter() - start) * 1000
+
+            if result.get_error_code() != EnumErrorCode.EC_OK:
+                err_msg = result.get_error_string()
+                if result.get_error_code() != EnumErrorCode.EC_UNSUPPORTED_JSON_KEY_WARNING:
+                    logger.warning("Dynamsoft capture error: %s", err_msg)
+
+            barcode_result = result.get_decoded_barcodes_result()
+            if barcode_result is None:
+                logger.info("dynamsoft found 0 codes in %.1fms", elapsed)
+                return [ScanResult(
+                    content="", bbox=(0, 0, 0, 0), scanner_used="dynamsoft",
+                    scan_time_ms=elapsed, success=False,
+                )]
+
+            items = barcode_result.get_items()
+            if not items:
+                logger.info("dynamsoft found 0 codes in %.1fms", elapsed)
+                return [ScanResult(
+                    content="", bbox=(0, 0, 0, 0), scanner_used="dynamsoft",
+                    scan_time_ms=elapsed, success=False,
+                )]
+
+            results: list[ScanResult] = []
+            seen: set[str] = set()
+            for item in items:
+                text = item.get_text()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+
+                location = item.get_location()
+                points = location.points
+                xs = [p.x for p in points]
+                ys = [p.y for p in points]
+                x1, y1 = min(xs), min(ys)
+                x2, y2 = max(xs), max(ys)
+
+                results.append(ScanResult(
+                    content=text,
+                    bbox=(max(0, x1), max(0, y1), max(0, x2), max(0, y2)),
+                    scanner_used="dynamsoft",
+                    scan_time_ms=elapsed,
+                    success=True,
+                ))
+
+            logger.info("dynamsoft found %d codes in %.1fms", len(results), elapsed)
+            return results if results else [ScanResult(
+                content="", bbox=(0, 0, 0, 0), scanner_used="dynamsoft",
+                scan_time_ms=elapsed, success=False,
+            )]
+
+        except Exception as exc:
+            elapsed = (time.perf_counter() - start) * 1000
+            logger.warning("dynamsoft scan failed: %s", exc)
+            return [ScanResult(
+                content="", bbox=(0, 0, 0, 0), scanner_used="dynamsoft",
+                scan_time_ms=elapsed, success=False, error_message=str(exc),
+            )]
+
+    def name(self) -> str:
+        return "dynamsoft"
+
+
 class CompositeScanner:
     """Try multiple scanners and merge unique results.
 
@@ -227,8 +394,8 @@ class CompositeScanner:
 
     def __init__(
         self,
-        primary: PylibdmtxScanner | ZxingScanner,
-        fallback: PylibdmtxScanner | ZxingScanner | None = None,
+        primary: "PylibdmtxScanner | ZxingScanner | DynamsoftScanner",
+        fallback: "PylibdmtxScanner | ZxingScanner | DynamsoftScanner | None" = None,
         merge_results: bool = True,
     ):
         self._primary = primary

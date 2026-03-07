@@ -211,7 +211,15 @@ class CameraService:
                             try:
                                 frame_q.put_nowait(enc.tobytes())
                             except _queue.Full:
-                                pass  # drop frame; client is slow
+                                # Drop oldest frame and push new one for fresher preview
+                                try:
+                                    frame_q.get_nowait()
+                                except _queue.Empty:
+                                    pass
+                                try:
+                                    frame_q.put_nowait(enc.tobytes())
+                                except _queue.Full:
+                                    pass
             finally:
                 lock.release()
                 with _ACTIVE_STREAMS_MU:

@@ -28,7 +28,7 @@ decoding:
   merge_results: true             # merge results from both scanners
   pylibdmtx:
     timeout_ms: 5000              # higher timeout = finds more codes (used for capture/batch)
-    fast_timeout_ms: 3000         # timeout for live-preview mode (trade-off: speed vs accuracy)
+    fast_timeout_ms: 1200         # timeout for live-preview mode (capped at 1500ms in code)
     # max_count: null             # null = find all codes (no limit)
     shrink: 1                     # 1 = full resolution, 2+ = faster but may miss small codes
     threshold: 50
@@ -87,6 +87,15 @@ opencv_datamatrix:
   clahe_clip_limit: 3.0
   fallback_full_image: true
   min_output_confidence: 0.6  # hide / do not return results below 60%
+
+# Dynamsoft Barcode Reader — primary scanner when installed.
+# pip install dynamsoft_barcode_reader_bundle
+# Falls back to pylibdmtx/zxing automatically if unavailable.
+dynamsoft:
+  enabled: true
+  license_key: "DLS2eyJvcmdhbml6YXRpb25JRCI6IjIwMDAwMSJ9"  # free public trial (requires network)
+  fast_template: "speed_first"         # live preview: speed_first / default / read_rate_first
+  batch_template: "read_rate_first"    # capture/batch: read_rate_first for max accuracy
 
 # --- OPTIONAL: YOLO-based detection (only needed if library scanning is insufficient) ---
 # Uncomment and configure if you want to train a custom YOLO model for detection.
