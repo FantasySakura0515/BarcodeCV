@@ -232,7 +232,21 @@ export default function LiveDetectionPage() {
     setIsLoadingCameras(true);
     setError(null);
     try {
-      const [backendItems, browserItems] = await Promise.all([fetchCameras(), getBrowserCameras()]);
+      // Run both fetches independently so a browser-camera failure
+      // (e.g. HTTP non-secure context on Pi) never blocks backend cameras.
+      const [backendResult, browserResult] = await Promise.allSettled([
+        fetchCameras(),
+        getBrowserCameras(),
+      ]);
+
+      const backendItems = backendResult.status === "fulfilled" ? backendResult.value : [];
+      const browserItems = browserResult.status === "fulfilled" ? browserResult.value : [];
+
+      if (backendResult.status === "rejected") {
+        const msg = backendResult.reason instanceof Error ? backendResult.reason.message : "無法連線到後端";
+        setError(`後端鏡頭載入失敗：${msg}`);
+      }
+
       const items: LiveCameraOption[] = [
         ...browserItems,
         ...backendItems.map((item) => ({
@@ -637,19 +651,29 @@ async function getBrowserCameras(): Promise<LiveCameraOption[]> {
     return [];
   }
 
-  const devices = await navigator.mediaDevices.enumerateDevices();
-  const videoInputs = devices.filter((device) => device.kind === "videoinput");
+  // mediaDevices API requires a secure context (HTTPS or localhost).
+  // On Pi accessed via http://192.168.x.x:3000, this will be unavailable.
+  if (typeof window !== "undefined" && !window.isSecureContext) {
+    return [];
+  }
 
-  return videoInputs.map((device, index) => ({
-    id: `browser-${device.deviceId || index}`,
-    label: device.label || `設備鏡頭 ${index + 1}`,
-    sourceType: "browser",
-    sourceScope: "browser",
-    deviceId: device.deviceId,
-    cameraNum: index,
-    width: 1280,
-    height: 720,
-    available: true,
-    status: device.label ? "可直接使用" : "首次使用時將要求鏡頭權限",
-  }));
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoInputs = devices.filter((device) => device.kind === "videoinput");
+
+    return videoInputs.map((device, index) => ({
+      id: `browser-${device.deviceId || index}`,
+      label: device.label || `設備鏡頭 ${index + 1}`,
+      sourceType: "browser",
+      sourceScope: "browser",
+      deviceId: device.deviceId,
+      cameraNum: index,
+      width: 1280,
+      height: 720,
+      available: true,
+      status: device.label ? "可直接使用" : "首次使用時將要求鏡頭權限",
+    }));
+  } catch {
+    return [];
+  }
 }
