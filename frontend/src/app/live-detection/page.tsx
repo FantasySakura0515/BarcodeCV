@@ -50,6 +50,7 @@ export default function LiveDetectionPage() {
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debugInfo, setDebugInfo] = useState<string | null>(null);
   const [performanceMode, setPerformanceMode] = useState<PerformanceMode>("auto");
   const [browserStream, setBrowserStream] = useState<MediaStream | null>(null);
   const [overlaySourceSize, setOverlaySourceSize] = useState<ImageSize | null>(null);
@@ -231,29 +232,33 @@ export default function LiveDetectionPage() {
   async function refreshCameras() {
     setIsLoadingCameras(true);
     setError(null);
+    setDebugInfo(null);
     try {
       const [backendResult, browserResult] = await Promise.allSettled([
-        fetchCameras(),     // already has 10s AbortSignal timeout inside
+        fetchCameras(),
         getBrowserCameras(),
       ]);
 
-      // Defensive: ensure we always have arrays even if the API returns unexpected data.
       const rawBackend = backendResult.status === "fulfilled" ? backendResult.value : undefined;
       const rawBrowser = browserResult.status === "fulfilled" ? browserResult.value : undefined;
       const backendItems: CameraInfo[] = Array.isArray(rawBackend) ? (rawBackend as CameraInfo[]) : [];
       const browserItems: LiveCameraOption[] = Array.isArray(rawBrowser) ? rawBrowser : [];
 
-      // Log for debugging — visible in browser console.
-      console.debug("[refreshCameras] backendResult:", backendResult);
-      console.debug("[refreshCameras] browserResult:", browserResult);
-      console.debug("[refreshCameras] backendItems:", backendItems, "browserItems:", browserItems);
+      // Build on-page debug summary (always visible without DevTools)
+      const dbg = [
+        `backend: ${backendResult.status}`,
+        backendResult.status === "fulfilled"
+          ? `value type=${Array.isArray(rawBackend) ? "array" : typeof rawBackend}, len=${backendItems.length}, raw=${JSON.stringify(rawBackend)?.slice(0, 200)}`
+          : `reason=${String(backendResult.reason)}`,
+        `browser: ${browserResult.status}, len=${browserItems.length}`,
+      ].join(" | ");
+      setDebugInfo(dbg);
+      console.debug("[refreshCameras]", dbg);
 
       if (backendResult.status === "rejected") {
         const msg = backendResult.reason instanceof Error ? backendResult.reason.message : "無法連線到後端";
         setError(`後端鏡頭載入失敗：${msg}`);
       } else if (!Array.isArray(rawBackend)) {
-        // fetchCameras() resolved but returned non-array — log for diagnosis.
-        console.warn("[refreshCameras] fetchCameras() resolved with non-array:", rawBackend);
         setError(`後端回應格式異常（非陣列）：${JSON.stringify(rawBackend)?.slice(0, 120)}`);
       }
 
@@ -265,7 +270,6 @@ export default function LiveDetectionPage() {
         })),
       ];
 
-      console.debug("[refreshCameras] final items:", items);
       setCameras(items);
 
       const preferred = items.find((item) => item.id === selectedCameraId && item.available)
@@ -276,7 +280,7 @@ export default function LiveDetectionPage() {
       setSelectedCameraId(preferred?.id ?? "");
     } catch (err) {
       const message = err instanceof Error ? err.message : "無法取得鏡頭清單";
-      console.error("[refreshCameras] unexpected error:", err);
+      setDebugInfo(`catch: ${String(err)}`);
       setError(message);
     } finally {
       setIsLoadingCameras(false);
@@ -542,6 +546,12 @@ export default function LiveDetectionPage() {
                   <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
                     ⚠ {error}
                   </p>
+                ) : null}
+                {debugInfo ? (
+                  <details className="rounded-md border border-muted bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                    <summary className="cursor-pointer font-medium">🔍 Debug 資訊</summary>
+                    <p className="mt-1 break-all font-mono">{debugInfo}</p>
+                  </details>
                 ) : null}
               </div>
 
