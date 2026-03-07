@@ -151,26 +151,33 @@ class CameraService:
         """Probe a PiCamera by first checking global_camera_info, then opening."""
         # Step 1: non-invasive check — picamera2 can list cameras without opening them
         available_cams = PiCameraSource.available_cameras()
+        logger.info("PiCamera probe: available_cameras() = %s", available_cams)
+
         if available_cams:
             available_nums = [info.get("Num", i) for i, info in enumerate(available_cams)]
             if camera_num not in available_nums:
-                logger.info(
-                    "PiCamera %d not in detected cameras %s", camera_num, available_nums
-                )
-                return False, f"鏡頭 {camera_num} 未找到 (可用: {available_nums})"
+                msg = f"鏡頭 {camera_num} 未找到 (可用索引: {available_nums})"
+                logger.warning("PiCamera probe: %s", msg)
+                return False, msg
             # Camera index exists — return info without fully opening it
             info = available_cams[available_nums.index(camera_num)]
             model = info.get("Model", "unknown")
-            return True, f"picam{camera_num} ({model})"
+            status = f"picam{camera_num} ({model})"
+            logger.info("PiCamera probe: camera %d found — %s", camera_num, status)
+            return True, status
 
-        # Step 2: fallback — try opening (may be slower, ensures picamera2 works)
+        # Step 2: fallback — try opening (slower, ensures picamera2 works)
+        logger.warning(
+            "PiCamera probe: global_camera_info returned empty, trying to open camera %d directly",
+            camera_num,
+        )
         source = PiCameraSource(camera_num=camera_num)
         try:
             source.open()
             frame = source.capture_frame()
             return True, f"{frame.resolution[0]}x{frame.resolution[1]}"
         except Exception as exc:
-            logger.info("Picamera probe failed for camera %d: %s", camera_num, exc)
+            logger.warning("PiCamera probe failed for camera %d: %s", camera_num, exc)
             return False, str(exc)
         finally:
             # Always release resources, even if capture_frame() raised
