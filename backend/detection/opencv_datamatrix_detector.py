@@ -350,12 +350,13 @@ class OpenCVDataMatrixDetector:
 		detector_cfg = config.get("opencv_datamatrix", {})
 
 		if fast:
-			# Build a fast scanner with reduced timeout for live preview
+			# Build a fast scanner for live preview — balanced between speed and accuracy.
 			dec_cfg = config.get("decoding", {})
 			dmtx_cfg = dec_cfg.get("pylibdmtx", {})
+			# Use config timeout or a generous default; 100ms was too tight on Pi.
+			fast_timeout = dmtx_cfg.get("fast_timeout_ms", dmtx_cfg.get("timeout_ms", 2000))
 			pylibdmtx = PylibdmtxScanner(
-				# Very tight timeout for live preview — a visible code should be found fast
-				timeout_ms=100,
+				timeout_ms=fast_timeout,
 				max_count=dmtx_cfg.get("max_count"),
 				shrink=max(dmtx_cfg.get("shrink", 1), 1),
 				threshold=dmtx_cfg.get("threshold", 50),
@@ -376,11 +377,11 @@ class OpenCVDataMatrixDetector:
 				aspect_ratio_min=detector_cfg.get("aspect_ratio_min", 0.5),
 				aspect_ratio_max=detector_cfg.get("aspect_ratio_max", 2.0),
 				padding=detector_cfg.get("padding", 20),
-				max_candidates=12,
+				max_candidates=detector_cfg.get("max_candidates", 120),
 				clahe_clip_limit=detector_cfg.get("clahe_clip_limit", 3.0),
 				fallback_full_image=True,
-				max_roi_scan_variants=1,       # original only — fastest ROI path
-				max_full_frame_scan_variants=2, # original + enhanced for full-frame
+				max_roi_scan_variants=3,        # original + enhanced + inverted
+				max_full_frame_scan_variants=4, # original + enhanced + inverted + binary
 			)
 
 		# Full-quality scanner for batch/capture mode

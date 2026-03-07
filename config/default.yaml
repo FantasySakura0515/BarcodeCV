@@ -27,7 +27,8 @@ decoding:
   fallback_decoder: "zxing"       # null to disable fallback
   merge_results: true             # merge results from both scanners
   pylibdmtx:
-    timeout_ms: 5000              # higher timeout = finds more codes
+    timeout_ms: 5000              # higher timeout = finds more codes (used for capture/batch)
+    fast_timeout_ms: 2000         # timeout for live-preview mode (trade-off: speed vs accuracy)
     # max_count: null             # null = find all codes (no limit)
     shrink: 1                     # 1 = full resolution, 2+ = faster but may miss small codes
     threshold: 50
