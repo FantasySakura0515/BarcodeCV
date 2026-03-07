@@ -125,6 +125,43 @@ class OpenCVDataMatrixDetector:
 		)
 		return merged
 
+	def decode_bboxes(
+		self,
+		image: np.ndarray,
+		bboxes: list[tuple[int, int, int, int]],
+	) -> list[OpenCVDataMatrixResult]:
+		"""Decode only inside provided candidate boxes.
+
+		Used by the live pipeline to avoid expensive full-frame scanning.
+		Each input bbox is expanded by detector padding before ROI decode.
+		"""
+		results: list[OpenCVDataMatrixResult] = []
+		for bbox in bboxes:
+			x1, y1, x2, y2 = self._expand_bbox(bbox, image.shape)
+			roi = crop_region(image, (x1, y1, x2, y2))
+			if roi.size == 0:
+				continue
+			decoded = self._scan_roi_variants(roi)
+			for item in decoded:
+				if not item.success or not item.content:
+					continue
+				results.append(
+					OpenCVDataMatrixResult(
+						content=item.content,
+						bbox=(
+							x1 + int(item.bbox[0]),
+							y1 + int(item.bbox[1]),
+							x1 + int(item.bbox[2]),
+							y1 + int(item.bbox[3]),
+						),
+						confidence=0.95,
+						decoder_used=item.scanner_used,
+						detection_source="provided-roi",
+						scan_time_ms=item.scan_time_ms,
+					)
+				)
+		return self._deduplicate(results)
+
 	def _scan_roi_variants(self, roi: np.ndarray) -> list:
 		"""Try progressively more aggressive preprocessing until a code is found.
 

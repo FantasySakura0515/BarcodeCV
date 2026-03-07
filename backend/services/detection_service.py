@@ -13,7 +13,6 @@ from ..database.repository import ScanRecord, ScanRepository
 from ..decoding.direct_scanner import ScanResult
 from ..detection.box_detector import BoxDetector
 from ..detection.opencv_datamatrix_detector import OpenCVDataMatrixDetector, OpenCVDataMatrixResult
-from ..detection.preprocessor import preprocess_for_detection
 from ..detection.spatial_matcher import SpatialMatcher
 from ..services.model_service import ModelService
 
@@ -147,14 +146,29 @@ class DetectionService:
 
     def _detect_objects(self, image: np.ndarray, fast: bool) -> list[OpenCVDataMatrixResult]:
         detector = self._fast_detector if fast else self._detector
+        if fast and self._box_detection_enabled and self._box_detector is not None and self._spatial_matcher is not None:
+            boxes = self._detect_boxes_fast(image)
+            if boxes:
+                dm_detections = detector.decode_bboxes(image, [box.bbox for box in boxes])
+                return self._merge_box_and_dm(boxes, dm_detections)
+
+            downscaled, scale = self._resize_for_fast_scan(image, target_width=1280)
+            dm_detections = detector.detect_and_decode(downscaled)
+            return self._scale_dm_results(dm_detections, scale)
+
         dm_detections = detector.detect_and_decode(image)
 
         if not self._box_detection_enabled or self._box_detector is None or self._spatial_matcher is None:
             return dm_detections
 
-        processed = preprocess_for_detection(image)
-        boxes = self._box_detector.detect(processed)
+        boxes = self._box_detector.detect(image)
         if not boxes:
+            return dm_detections
+
+        return self._merge_box_and_dm(boxes, dm_detections)
+
+    def _merge_box_and_dm(self, boxes, dm_detections: list[OpenCVDataMatrixResult]) -> list[OpenCVDataMatrixResult]:
+        if self._spatial_matcher is None:
             return dm_detections
 
         scan_results = [
@@ -205,6 +219,65 @@ class DetectionService:
             merged.append(item)
 
         return merged
+
+    def _detect_boxes_fast(self, image: np.ndarray):
+        if self._box_detector is None:
+            return []
+        downscaled, scale = self._resize_for_fast_scan(image, target_width=960)
+        boxes_small = self._box_detector.detect(downscaled)
+        if scale == 1.0:
+            return boxes_small
+
+        scaled_boxes = []
+        for box in boxes_small:
+            x1, y1, x2, y2 = box.bbox
+            scaled_boxes.append(
+                type(box)(
+                    bbox=(
+                        int(round(x1 / scale)),
+                        int(round(y1 / scale)),
+                        int(round(x2 / scale)),
+                        int(round(y2 / scale)),
+                    ),
+                    area=float(box.area / max(scale * scale, 1e-6)),
+                    contour=box.contour,
+                )
+            )
+        return scaled_boxes
+
+    @staticmethod
+    def _resize_for_fast_scan(image: np.ndarray, target_width: int = 1280) -> tuple[np.ndarray, float]:
+        height, width = image.shape[:2]
+        if width <= target_width:
+            return image, 1.0
+        scale = target_width / float(width)
+        resized_height = max(1, int(round(height * scale)))
+        resized = cv2.resize(image, (target_width, resized_height), interpolation=cv2.INTER_AREA)
+        return resized, scale
+
+    @staticmethod
+    def _scale_dm_results(results: list[OpenCVDataMatrixResult], scale: float) -> list[OpenCVDataMatrixResult]:
+        if scale == 1.0:
+            return results
+        scaled: list[OpenCVDataMatrixResult] = []
+        for item in results:
+            x1, y1, x2, y2 = item.bbox
+            scaled.append(
+                OpenCVDataMatrixResult(
+                    content=item.content,
+                    bbox=(
+                        int(round(x1 / scale)),
+                        int(round(y1 / scale)),
+                        int(round(x2 / scale)),
+                        int(round(y2 / scale)),
+                    ),
+                    confidence=item.confidence,
+                    decoder_used=item.decoder_used,
+                    detection_source=item.detection_source,
+                    scan_time_ms=item.scan_time_ms,
+                )
+            )
+        return scaled
 
     @staticmethod
     def _draw_object_overlays(image: np.ndarray, detections: list[OpenCVDataMatrixResult]) -> np.ndarray:

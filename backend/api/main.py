@@ -46,12 +46,19 @@ async def lifespan(app: FastAPI):
 
     model_service = ModelService(db_manager.get_connection())
     model_service.ensure_seed_models()
+    detection_service = DetectionService(db_manager.get_connection(), config)
+    camera_service = CameraService(config, detection_service)
+    stats_service = StatsService(db_manager.get_connection(), config)
 
     image_dir = Path(config.get("system", {}).get("image_output_dir", "./output/images"))
     image_dir.mkdir(parents=True, exist_ok=True)
 
     app.state.config = config
     app.state.db_manager = db_manager
+    app.state.model_service = model_service
+    app.state.detection_service = detection_service
+    app.state.camera_service = camera_service
+    app.state.stats_service = stats_service
     yield
     db_manager.close()
 
@@ -78,19 +85,19 @@ app.mount("/api/images", StaticFiles(directory=str(_static_dir)), name="images")
 
 
 def get_detection_service() -> DetectionService:
-    return DetectionService(app.state.db_manager.get_connection(), app.state.config)
+    return app.state.detection_service
 
 
 def get_model_service() -> ModelService:
-    return ModelService(app.state.db_manager.get_connection())
+    return app.state.model_service
 
 
 def get_camera_service() -> CameraService:
-    return CameraService(getattr(app.state, "config"), get_detection_service())
+    return app.state.camera_service
 
 
 def get_stats_service() -> StatsService:
-    return StatsService(app.state.db_manager.get_connection(), app.state.config)
+    return app.state.stats_service
 
 
 @app.get("/api/health")
