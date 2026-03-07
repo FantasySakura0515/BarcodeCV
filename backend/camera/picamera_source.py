@@ -2,6 +2,7 @@ import logging
 import subprocess
 from datetime import datetime
 
+import cv2
 import numpy as np
 
 from .base import CameraSource, Frame
@@ -31,9 +32,25 @@ class PiCameraSource(CameraSource):
         self._camera_id = camera_id or f"picam{camera_num}"
         self._picam = None
         self._fmt: str = "BGR888"  # format successfully negotiated in open()
+        self._rotation: int = 0    # degrees (0, 90, 180, 270); set from camera info
 
     def open(self) -> None:
         from picamera2 import Picamera2
+
+        # Read rotation from global_camera_info before opening
+        try:
+            infos = Picamera2.global_camera_info()
+            for info in infos:
+                if info.get("Num") == self._camera_num:
+                    self._rotation = int(info.get("Rotation", 0))
+                    logger.info(
+                        "PiCamera %d rotation from metadata: %d°",
+                        self._camera_num,
+                        self._rotation,
+                    )
+                    break
+        except Exception:
+            pass  # non-fatal; will use rotation=0
 
         self._picam = Picamera2(camera_num=self._camera_num)
 
@@ -110,6 +127,14 @@ class PiCameraSource(CameraSource):
         else:
             # BGR888 (or unknown 3-channel): use as-is
             bgr_array = raw
+
+        # Correct for physical camera rotation reported by libcamera
+        if self._rotation == 180:
+            bgr_array = cv2.rotate(bgr_array, cv2.ROTATE_180)
+        elif self._rotation == 90:
+            bgr_array = cv2.rotate(bgr_array, cv2.ROTATE_90_CLOCKWISE)
+        elif self._rotation == 270:
+            bgr_array = cv2.rotate(bgr_array, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         return Frame(
             image=bgr_array,
