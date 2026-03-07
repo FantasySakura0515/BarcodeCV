@@ -184,9 +184,27 @@ class ScanPipeline:
     def _run_library_only(self, image, session_id, timestamp, image_path) -> ScanSummary:
         """Scan with library scanners + optional OpenCV box detection."""
         logger.info("=== Library scan (pylibdmtx/zxing-cpp) ===")
+
+        # Scan global (wide view)
         results = self._scanner.scan(image)
         successful = [r for r in results if r.success]
-        logger.info("Found %d DataMatrix codes", len(successful))
+        logger.info("Global camera: found %d DataMatrix codes", len(successful))
+
+        # Scan local (close-up) and merge unique results
+        try:
+            local_frame = self._cameras.capture_local()
+            local_results = self._scanner.scan(local_frame.image)
+            local_ok = [r for r in local_results if r.success]
+            logger.info("Local camera: found %d DataMatrix codes", len(local_ok))
+            seen = {r.content for r in successful}
+            for r in local_ok:
+                if r.content not in seen:
+                    successful.append(r)
+                    seen.add(r.content)
+        except Exception as e:
+            logger.warning("Local camera scan skipped: %s", e)
+
+        logger.info("Total unique DataMatrix codes: %d", len(successful))
 
         # Persist scan records
         scan_record_map: dict[str, int] = {}

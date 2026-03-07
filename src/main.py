@@ -149,28 +149,43 @@ def _run_preview(config: dict):
             if key == ord("q"):
                 break
             elif key == ord("s"):
-                # One-shot scan
+                # One-shot scan: both cameras
                 logger.info("Scanning current frame...")
                 scanner = CompositeScanner.from_config(config)
-                results = scanner.scan(global_frame.image)
-                successful = [r for r in results if r.success]
 
-                for r in successful:
-                    logger.info("  Found: %s (%s)", r.content, r.scanner_used)
+                # Scan global (wide view)
+                global_results = scanner.scan(global_frame.image)
+                global_ok = [r for r in global_results if r.success]
+                for r in global_ok:
+                    logger.info("  [Global] %s (%s)", r.content, r.scanner_used)
+
+                # Scan local (close-up)
+                local_results = scanner.scan(local_frame.image)
+                local_ok = [r for r in local_results if r.success]
+                for r in local_ok:
+                    logger.info("  [Local]  %s (%s)", r.content, r.scanner_used)
+
+                # Merge unique results
+                seen = {r.content for r in global_ok}
+                all_results = list(global_ok)
+                for r in local_ok:
+                    if r.content not in seen:
+                        all_results.append(r)
+                        seen.add(r.content)
 
                 # Match with boxes if available
-                if successful and box_detector:
+                if all_results and box_detector:
                     boxes = box_detector.detect(global_frame.image)
                     if boxes:
                         matcher = SpatialMatcher.from_config(config)
-                        matches = matcher.match(boxes, successful)
+                        matches = matcher.match(boxes, all_results)
                         matched = [m for m in matches if m.status == "matched"]
                         missing = [m for m in matches if m.status != "matched"]
                         logger.info("  %d boxes matched, %d missing DataMatrix", len(matched), len(missing))
                         for m in missing:
                             logger.warning("  [!!] Box at %s has no DataMatrix", m.box.bbox)
 
-                if not successful:
+                if not all_results:
                     logger.info("  No DataMatrix found")
 
         cv2.destroyAllWindows()
