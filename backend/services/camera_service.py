@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
+import time as _time
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -14,8 +15,8 @@ from .detection_service import DetectionPreviewResult, DetectionRunResult, Detec
 
 logger = logging.getLogger("barcodecv.camera")
 
-# Global per-camera locks — keyed by camera_id.
-# Prevents two concurrent requests from calling open() on the same physical camera.
+# ── Per-camera exclusive locks ──────────────────────────────────────────────
+# Prevents two requests from calling open() on the same physical camera.
 _CAMERA_LOCKS: dict[str, threading.Lock] = {}
 _CAMERA_LOCKS_MU = threading.Lock()
 
@@ -25,6 +26,31 @@ def _get_camera_lock(camera_id: str) -> threading.Lock:
         if camera_id not in _CAMERA_LOCKS:
             _CAMERA_LOCKS[camera_id] = threading.Lock()
         return _CAMERA_LOCKS[camera_id]
+
+
+# ── Per-camera raw frame cache ──────────────────────────────────────────────
+# Detection and capture both store the last captured numpy frame here.
+# preview endpoint can serve from cache when camera is locked by detection,
+# avoiding the "preview frozen while scanning" problem.
+_FRAME_CACHE: dict[str, tuple[np.ndarray, float]] = {}  # camera_id -> (frame, monotonic_ts)
+_FRAME_CACHE_MU = threading.Lock()
+_FRAME_CACHE_MAX_AGE_S = 5.0  # serve cached frame up to 5 s stale
+
+
+def _cache_frame(camera_id: str, frame: np.ndarray) -> None:
+    with _FRAME_CACHE_MU:
+        _FRAME_CACHE[camera_id] = (frame, _time.monotonic())
+
+
+def _get_cached_frame(camera_id: str) -> np.ndarray | None:
+    with _FRAME_CACHE_MU:
+        entry = _FRAME_CACHE.get(camera_id)
+    if entry is None:
+        return None
+    frame, ts = entry
+    if _time.monotonic() - ts > _FRAME_CACHE_MAX_AGE_S:
+        return None
+    return frame
 
 
 @dataclass
@@ -77,21 +103,38 @@ class CameraService:
         return cameras
 
     def capture_preview(self, camera_id: str, max_width: int | None = None, quality: int = 70) -> bytes:
-        with _get_camera_lock(camera_id):
+        lock = _get_camera_lock(camera_id)
+        # Try to acquire without blocking so detection never freezes the preview.
+        acquired = lock.acquire(timeout=0.08)  # 80 ms non-blocking try
+        if not acquired:
+            # Camera busy (detection running) — serve cached frame if available.
+            cached = _get_cached_frame(camera_id)
+            if cached is not None:
+                logger.debug("preview cache hit for %s", camera_id)
+                image = self._resize_to_max_width(cached, max_width)
+                ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), max(30, min(quality, 95))])
+                if ok:
+                    return encoded.tobytes()
+            # No cache yet — wait for the lock (first request ever).
+            lock.acquire()
+            acquired = True
+        try:
             with self._create_camera_source(camera_id) as camera:
                 frame = camera.capture_frame()
-
-        image = self._resize_to_max_width(frame.image, max_width)
-
-        ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), max(30, min(quality, 90))])
-        if not ok:
-            raise RuntimeError("無法編碼鏡頭畫面")
-        return encoded.tobytes()
+            _cache_frame(camera_id, frame.image)
+            image = self._resize_to_max_width(frame.image, max_width)
+            ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), max(30, min(quality, 95))])
+            if not ok:
+                raise RuntimeError("無法編碼鏡頭畫面")
+            return encoded.tobytes()
+        finally:
+            lock.release()
 
     def capture_and_detect(self, camera_id: str, model_type: str = "opencv") -> DetectionRunResult:
         with _get_camera_lock(camera_id):
             with self._create_camera_source(camera_id) as camera:
                 frame = camera.capture_frame()
+            _cache_frame(camera_id, frame.image)
 
         return self._detection_service.run_detection_on_image(
             image=frame.image,
@@ -110,6 +153,7 @@ class CameraService:
         with _get_camera_lock(camera_id):
             with self._create_camera_source(camera_id) as camera:
                 frame = camera.capture_frame()
+            _cache_frame(camera_id, frame.image)
 
         image = self._resize_to_max_width(frame.image, max_width)
 

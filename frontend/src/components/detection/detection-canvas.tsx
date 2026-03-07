@@ -17,12 +17,14 @@ export function DetectionCanvas({
   selectedBid,
   onSelect,
   sourceImageSize,
+  onImageLoad,
 }: {
   imageUrl: string | null;
   objects: DetectionObject[];
   selectedBid: string | null;
   onSelect?: (bid: string) => void;
   sourceImageSize?: ImageSize | null;
+  onImageLoad?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerSize, setContainerSize] = useState<Size>({ width: 0, height: 0 });
@@ -97,6 +99,7 @@ export function DetectionCanvas({
                   width: event.currentTarget.naturalWidth,
                   height: event.currentTarget.naturalHeight,
                 });
+                onImageLoad?.();
               }}
             />
 

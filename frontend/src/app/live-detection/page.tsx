@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Camera, CameraRotate, Play, Stop, WarningCircle } from "@phosphor-icons/react";
 
 import { EmptyState } from "@/components/common/empty-state";
@@ -23,10 +23,11 @@ const PERFORMANCE_PROFILES: Record<PerformanceMode, {
   detectWidth: number;
   jpegQuality: number;
 }> = {
-  auto: { previewIntervalMs: 900, detectIntervalMs: 1800, previewWidth: 640, detectWidth: 640, jpegQuality: 0.72 },
-  low: { previewIntervalMs: 1400, detectIntervalMs: 2600, previewWidth: 480, detectWidth: 480, jpegQuality: 0.55 },
-  balanced: { previewIntervalMs: 900, detectIntervalMs: 1800, previewWidth: 640, detectWidth: 640, jpegQuality: 0.72 },
-  high: { previewIntervalMs: 500, detectIntervalMs: 1100, previewWidth: 960, detectWidth: 960, jpegQuality: 0.85 },
+  // Preview uses full-res JPEG (up to 1920); detection uses smaller crop for speed.
+  auto:     { previewIntervalMs: 600,  detectIntervalMs: 1800, previewWidth: 1280, detectWidth: 640, jpegQuality: 0.80 },
+  low:      { previewIntervalMs: 1200, detectIntervalMs: 2600, previewWidth: 640,  detectWidth: 480, jpegQuality: 0.60 },
+  balanced: { previewIntervalMs: 600,  detectIntervalMs: 1800, previewWidth: 1280, detectWidth: 640, jpegQuality: 0.80 },
+  high:     { previewIntervalMs: 300,  detectIntervalMs: 1400, previewWidth: 1920, detectWidth: 640, jpegQuality: 0.88 },
 };
 
 interface SurfaceSize {
@@ -50,8 +51,6 @@ export default function LiveDetectionPage() {
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [debugInfo, setDebugInfo] = useState<string | null>(null);
-  const [fetchStep, setFetchStep] = useState<string>("尚未開始");
   const [performanceMode, setPerformanceMode] = useState<PerformanceMode>("auto");
   const [browserStream, setBrowserStream] = useState<MediaStream | null>(null);
   const [overlaySourceSize, setOverlaySourceSize] = useState<ImageSize | null>(null);
@@ -61,6 +60,7 @@ export default function LiveDetectionPage() {
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
   const browserStreamRef = useRef<MediaStream | null>(null);
   const browserPreviewUrlRef = useRef<string | null>(null);
+  const previewChainRef = useRef<{ cancelled: boolean; timer: number | null } | null>(null);
 
   const selectedCamera = useMemo(
     () => cameras.find((item) => item.id === selectedCameraId) ?? null,
@@ -203,16 +203,37 @@ export default function LiveDetectionPage() {
       return;
     }
 
-    const updatePreview = () => {
-      setPreviewUrl(
-        `/api/cameras/${selectedCameraId}/preview?ts=${Date.now()}&maxWidth=${performanceProfile.previewWidth}&quality=${Math.round(performanceProfile.jpegQuality * 100)}`,
-      );
-    };
+    const chain = { cancelled: false, timer: null as number | null };
+    previewChainRef.current = chain;
 
-    updatePreview();
-    const timer = window.setInterval(updatePreview, performanceProfile.previewIntervalMs);
-    return () => window.clearInterval(timer);
+    // kick off first request immediately
+    setPreviewUrl(
+      `/api/cameras/${selectedCameraId}/preview?ts=${Date.now()}&maxWidth=${performanceProfile.previewWidth}&quality=${Math.round(performanceProfile.jpegQuality * 100)}`,
+    );
+
+    return () => {
+      chain.cancelled = true;
+      if (chain.timer !== null) {
+        window.clearTimeout(chain.timer);
+        chain.timer = null;
+      }
+    };
   }, [isPreviewing, performanceProfile.jpegQuality, performanceProfile.previewIntervalMs, performanceProfile.previewWidth, selectedCamera?.sourceScope, selectedCameraId]);
+
+  // Called by DetectionCanvas when the preview img finishes loading.
+  // Schedules the next preview request after previewIntervalMs, giving the server
+  // a breathing window and preventing in-flight request pile-up.
+  const handlePreviewLoad = useCallback(() => {
+    const chain = previewChainRef.current;
+    if (!chain || chain.cancelled) return;
+    chain.timer = window.setTimeout(() => {
+      if (chain.cancelled) return;
+      chain.timer = null;
+      setPreviewUrl(
+        `/api/cameras/${selectedCameraId!}/preview?ts=${Date.now()}&maxWidth=${performanceProfile.previewWidth}&quality=${Math.round(performanceProfile.jpegQuality * 100)}`,
+      );
+    }, performanceProfile.previewIntervalMs);
+  }, [selectedCameraId, performanceProfile.previewIntervalMs, performanceProfile.previewWidth, performanceProfile.jpegQuality]);
 
   const selectedObject = objects.find((item) => item.bid === selectedBid) ?? null;
 
@@ -233,30 +254,16 @@ export default function LiveDetectionPage() {
   async function refreshCameras() {
     setIsLoadingCameras(true);
     setError(null);
-    setDebugInfo(null);
-    setFetchStep("1. setIsLoadingCameras(true) 完成");
     try {
-      setFetchStep("2. 呼叫 Promise.allSettled...");
       const [backendResult, browserResult] = await Promise.allSettled([
         fetchCameras(),
         getBrowserCameras(),
       ]);
-      setFetchStep("3. Promise.allSettled 已 resolve");
 
       const rawBackend = backendResult.status === "fulfilled" ? backendResult.value : undefined;
       const rawBrowser = browserResult.status === "fulfilled" ? browserResult.value : undefined;
       const backendItems: CameraInfo[] = Array.isArray(rawBackend) ? (rawBackend as CameraInfo[]) : [];
       const browserItems: LiveCameraOption[] = Array.isArray(rawBrowser) ? rawBrowser : [];
-
-      const dbg = [
-        `backend: ${backendResult.status}`,
-        backendResult.status === "fulfilled"
-          ? `type=${Array.isArray(rawBackend) ? "array" : typeof rawBackend}, len=${backendItems.length}, raw=${JSON.stringify(rawBackend)?.slice(0, 300)}`
-          : `reason=${String(backendResult.reason)}`,
-        `browser: ${browserResult.status}, len=${browserItems.length}`,
-      ].join(" | ");
-      setDebugInfo(dbg);
-      setFetchStep(`4. debugInfo set. backendItems.length=${backendItems.length}`);
 
       if (backendResult.status === "rejected") {
         const msg = backendResult.reason instanceof Error ? backendResult.reason.message : "無法連線到後端";
@@ -273,7 +280,6 @@ export default function LiveDetectionPage() {
         })),
       ];
 
-      setFetchStep(`5. setCameras(${items.length} items)`);
       setCameras(items);
 
       const preferred = items.find((item) => item.id === selectedCameraId && item.available)
@@ -282,15 +288,11 @@ export default function LiveDetectionPage() {
         ?? null;
 
       setSelectedCameraId(preferred?.id ?? "");
-      setFetchStep(`6. 完成。selectedId=${preferred?.id ?? "(none)"}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : "無法取得鏡頭清單";
-      setDebugInfo(`catch: ${String(err)}`);
-      setFetchStep(`ERR: ${String(err)}`);
       setError(message);
     } finally {
       setIsLoadingCameras(false);
-      setFetchStep((prev) => prev + " → finally done");
     }
   }
 
@@ -554,17 +556,6 @@ export default function LiveDetectionPage() {
                     ⚠ {error}
                   </p>
                 ) : null}
-                {debugInfo ? (
-                  <details className="rounded-md border border-muted bg-muted/30 px-3 py-2 text-xs text-muted-foreground" open>
-                    <summary className="cursor-pointer font-medium">🔍 Debug 資訊</summary>
-                    <p className="mt-1 break-all font-mono">步驟：{fetchStep}</p>
-                    <p className="mt-1 break-all font-mono">{debugInfo}</p>
-                  </details>
-                ) : (
-                  <p className="rounded-md border border-muted bg-muted/30 px-3 py-2 font-mono text-xs text-muted-foreground">
-                    步驟：{fetchStep}
-                  </p>
-                )}
               </div>
 
               <div className="space-y-2">
@@ -672,6 +663,7 @@ export default function LiveDetectionPage() {
                 selectedBid={selectedBid}
                 onSelect={setSelectedBid}
                 sourceImageSize={overlaySourceSize}
+                onImageLoad={handlePreviewLoad}
               />
             )}
           </SectionCard>
