@@ -44,6 +44,9 @@ class DetectionService:
         self._box_detection_enabled = config.get("box_detection", {}).get("enabled", True)
         self._box_detector = BoxDetector.from_config(config) if self._box_detection_enabled else None
         self._spatial_matcher = SpatialMatcher.from_config(config) if self._box_detection_enabled else None
+        self._min_result_confidence = float(
+            config.get("opencv_datamatrix", {}).get("min_output_confidence", 0.6)
+        )
         self._output_dir = Path(config.get("system", {}).get("image_output_dir", "./output/images"))
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -72,7 +75,7 @@ class DetectionService:
         model = self._model_service.get_active_model(model_type)
 
         input_path = self._save_image(image, f"{rid}_input.png")
-        detections = self._detect_objects(image, fast=False)
+        detections = self._apply_confidence_filter(self._detect_objects(image, fast=False))
         annotated = self._draw_object_overlays(image, detections)
         annotated_path = self._save_image(annotated, f"{rid}_annotated.png")
 
@@ -124,7 +127,7 @@ class DetectionService:
         model = self._model_service.get_active_model(model_type)
 
         input_path = self._save_image(image, f"{rid}_{Path(filename).stem}_preview.png") if save_preview_image else None
-        detections = self._detect_objects(image, fast=True)
+        detections = self._apply_confidence_filter(self._detect_objects(image, fast=True))
         objects = self._build_detection_objects(
             rid=rid,
             now=now,
@@ -219,6 +222,15 @@ class DetectionService:
             merged.append(item)
 
         return merged
+
+    def _apply_confidence_filter(
+        self,
+        detections: list[OpenCVDataMatrixResult],
+    ) -> list[OpenCVDataMatrixResult]:
+        return [
+            item for item in detections
+            if float(item.confidence or 0.0) >= self._min_result_confidence
+        ]
 
     def _detect_boxes_fast(self, image: np.ndarray):
         if self._box_detector is None:
@@ -428,6 +440,8 @@ class DetectionService:
         ).fetchone()
         if row is None:
             return None
+        if not self._passes_row_confidence(row):
+            return None
         model = self._model_service.get_active_model("opencv")
         return self._build_object_dict(row_id=row_id, rid=row["session_id"], row=row, model=model)
 
@@ -451,6 +465,7 @@ class DetectionService:
         return [
             self._build_object_dict(row_id=row["id"], rid=rid, row=row, model=model)
             for row in rows
+            if self._passes_row_confidence(row)
         ]
 
     @staticmethod
@@ -473,6 +488,9 @@ class DetectionService:
         path = self._output_dir / file_name
         cv2.imwrite(str(path), image)
         return f"/api/images/{file_name}"
+
+    def _passes_row_confidence(self, row: sqlite3.Row | dict) -> bool:
+        return float(row["detection_confidence"] or 0.0) >= self._min_result_confidence
 
     @staticmethod
     def _build_object_dict(row_id: int, rid: str, row: sqlite3.Row | dict, model: dict) -> dict:

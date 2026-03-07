@@ -71,7 +71,7 @@ box_detection:
   aspect_ratio_max: 2.4
 
 spatial_matching:
-  overlap_threshold: 0.3  # minimum IoU to count a DataMatrix as inside a box
+  overlap_threshold: 0.6  # minimum IoU to count a DataMatrix as inside a box
 
 opencv_datamatrix:
   min_area: 40
@@ -86,6 +86,7 @@ opencv_datamatrix:
   max_candidates: 150
   clahe_clip_limit: 3.0
   fallback_full_image: true
+  min_output_confidence: 0.6  # hide / do not return results below 60%
 
 # --- OPTIONAL: YOLO-based detection (only needed if library scanning is insufficient) ---
 # Uncomment and configure if you want to train a custom YOLO model for detection.
