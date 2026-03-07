@@ -18,9 +18,26 @@ export async function fetchModels() {
   return data.items;
 }
 
-export async function fetchCameras() {
-  const { data } = await apiClient.get<{ items: CameraInfo[] }>("/cameras");
-  return data.items;
+export async function fetchCameras(): Promise<CameraInfo[]> {
+  // Use native fetch with an explicit AbortSignal timeout.
+  // This avoids the axios baseURL SSR-initialisation issue where
+  // getApiBaseUrl() might be evaluated server-side (window undefined)
+  // and bake in the wrong base URL for the browser axios instance.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const res = await fetch("/api/cameras", {
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const json = await res.json() as { items: CameraInfo[] };
+    return json.items;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function fetchBatches() {
