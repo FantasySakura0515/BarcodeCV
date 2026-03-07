@@ -77,13 +77,12 @@ def _run_preview(config: dict):
     logger = logging.getLogger("barcodecv")
 
     camera_manager = CameraManager.from_config(config)
-    scanner = CompositeScanner.from_config(config)
 
     box_cfg = config.get("box_detection", {})
     box_detector = BoxDetector.from_config(config) if box_cfg.get("enabled", False) else None
 
     with camera_manager:
-        logger.info("Preview started — press 'q' to quit")
+        logger.info("Preview started — press 'q' to quit, 's' to scan")
 
         while True:
             global_frame = camera_manager.capture_global()
@@ -92,7 +91,7 @@ def _run_preview(config: dict):
             global_img = global_frame.image.copy()
             local_img = local_frame.image.copy()
 
-            # Box detection overlay on global image
+            # Box detection overlay on global image (fast, no scanning)
             if box_detector is not None:
                 processed = preprocess_for_detection(global_frame.image)
                 boxes = box_detector.detect(processed)
@@ -101,15 +100,6 @@ def _run_preview(config: dict):
                     cv2.rectangle(global_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(global_img, f"Box {i+1}", (x1, y1 - 8),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-            # DataMatrix scan overlay on global image
-            scan_results = scanner.scan(preprocess_for_detection(global_frame.image))
-            for r in scan_results:
-                if r.success:
-                    x1, y1, x2, y2 = r.bbox
-                    cv2.rectangle(global_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                    cv2.putText(global_img, r.content[:20], (x1, y2 + 18),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
             # Labels
             cv2.putText(global_img, "Global (CAM0)", (10, 30),
@@ -130,6 +120,16 @@ def _run_preview(config: dict):
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
+            elif key == ord("s"):
+                # One-shot scan on current frame
+                logger.info("Scanning current frame...")
+                scanner = CompositeScanner.from_config(config)
+                results = scanner.scan(preprocess_for_detection(global_frame.image))
+                for r in results:
+                    if r.success:
+                        logger.info("  Found: %s (%s)", r.content, r.scanner_used)
+                if not any(r.success for r in results):
+                    logger.info("  No DataMatrix found")
 
         cv2.destroyAllWindows()
         logger.info("Preview stopped")
