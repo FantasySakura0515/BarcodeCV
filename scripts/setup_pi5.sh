@@ -7,10 +7,11 @@ echo "=== BarcodeCV Raspberry Pi 5 Setup ==="
 # System dependencies
 bash scripts/install_dependencies.sh
 
-# Python environment (with --system-site-packages for picamera2 access)
+# Python environment (with --system-site-packages so picamera2/libcamera
+# installed by apt are accessible inside the venv)
 echo "=== Setting up Python virtual environment ==="
-python3 -m venv --system-site-packages venv
-source venv/bin/activate
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 
@@ -27,9 +28,7 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "Next steps:"
-echo "  1. Activate venv: source venv/bin/activate"
-echo "  2. Generate training data: python -m training.prepare_dataset"
-echo "  3. Train model (on GPU machine): python -m training.train"
-echo "  4. Export model: python -m training.export_model --model <path> --format ncnn"
-echo "  5. Run scanner: python -m src.main --mode single"
-echo "  6. Run calibration: python -m src.main --mode calibration"
+echo "  1. Activate venv:  source .venv/bin/activate"
+echo "  2. Start backend:  python -m backend.api"
+echo "  3. Camera debug:   curl http://localhost:8000/api/cameras/debug | python3 -m json.tool"
+echo "  4. Camera list:    curl http://localhost:8000/api/cameras"

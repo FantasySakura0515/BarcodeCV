@@ -24,6 +24,7 @@ from ..services.detection_service import DetectionService
 from ..services.camera_service import CameraService
 from ..services.model_service import ModelService
 from ..services.stats_service import StatsService
+from ..camera.picamera_source import PiCameraSource
 from ..utils.config_loader import load_config
 from ..utils.logger import setup_logger
 
@@ -179,6 +180,29 @@ def list_cameras() -> CameraListResponse:
         for item in get_camera_service().list_cameras()
     ]
     return CameraListResponse(items=items)
+
+
+@app.get("/api/cameras/debug")
+def debug_cameras() -> dict:
+    """Diagnostic endpoint: returns detailed camera detection info.
+
+    Useful on Raspberry Pi to see why cameras appear as unavailable.
+    Call via browser or curl:  GET /api/cameras/debug
+    """
+    return {
+        "configured_cameras": list(getattr(app.state, "config", {}).get("cameras", {}).keys()),
+        "probe_results": [
+            {
+                "id": item.id,
+                "camera_num": item.camera_num,
+                "source_type": item.source_type,
+                "available": item.available,
+                "status": item.status,
+            }
+            for item in get_camera_service().list_cameras()
+        ],
+        "system_diagnostics": PiCameraSource.diagnose(),
+    }
 
 
 @app.get("/api/cameras/{camera_id}/preview")
