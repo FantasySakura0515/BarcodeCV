@@ -26,8 +26,8 @@ const PERFORMANCE_PROFILES: Record<PerformanceMode, {
   // Preview uses full-res JPEG (up to 1920); detection uses smaller crop for speed.
   auto:     { previewIntervalMs: 600,  detectIntervalMs: 1800, previewWidth: 1280, detectWidth: 640, jpegQuality: 0.80 },
   low:      { previewIntervalMs: 1200, detectIntervalMs: 2600, previewWidth: 640,  detectWidth: 480, jpegQuality: 0.60 },
-  balanced: { previewIntervalMs: 600,  detectIntervalMs: 1800, previewWidth: 1280, detectWidth: 640, jpegQuality: 0.80 },
-  high:     { previewIntervalMs: 300,  detectIntervalMs: 1400, previewWidth: 1920, detectWidth: 640, jpegQuality: 0.88 },
+  balanced: { previewIntervalMs: 600,  detectIntervalMs: 1800, previewWidth: 1280, detectWidth: 1080, jpegQuality: 0.80 },
+  high:     { previewIntervalMs: 300,  detectIntervalMs: 1400, previewWidth: 1920, detectWidth: 1080, jpegQuality: 0.88 },
 };
 
 interface SurfaceSize {
