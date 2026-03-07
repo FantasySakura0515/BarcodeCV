@@ -10,7 +10,11 @@ import cv2
 import numpy as np
 
 from ..database.repository import ScanRecord, ScanRepository
-from ..detection.opencv_datamatrix_detector import OpenCVDataMatrixDetector
+from ..decoding.direct_scanner import ScanResult
+from ..detection.box_detector import BoxDetector
+from ..detection.opencv_datamatrix_detector import OpenCVDataMatrixDetector, OpenCVDataMatrixResult
+from ..detection.preprocessor import preprocess_for_detection
+from ..detection.spatial_matcher import SpatialMatcher
 from ..services.model_service import ModelService
 
 
@@ -38,6 +42,9 @@ class DetectionService:
         self._model_service = ModelService(conn)
         self._detector = OpenCVDataMatrixDetector.from_config(config)
         self._fast_detector = OpenCVDataMatrixDetector.from_config(config, fast=True)
+        self._box_detection_enabled = config.get("box_detection", {}).get("enabled", True)
+        self._box_detector = BoxDetector.from_config(config) if self._box_detection_enabled else None
+        self._spatial_matcher = SpatialMatcher.from_config(config) if self._box_detection_enabled else None
         self._output_dir = Path(config.get("system", {}).get("image_output_dir", "./output/images"))
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -66,8 +73,8 @@ class DetectionService:
         model = self._model_service.get_active_model(model_type)
 
         input_path = self._save_image(image, f"{rid}_input.png")
-        detections = self._detector.detect_and_decode(image)
-        annotated = self._detector.draw_detections(image, detections)
+        detections = self._detect_objects(image, fast=False)
+        annotated = self._draw_object_overlays(image, detections)
         annotated_path = self._save_image(annotated, f"{rid}_annotated.png")
 
         self._repo.insert_session(
@@ -118,7 +125,7 @@ class DetectionService:
         model = self._model_service.get_active_model(model_type)
 
         input_path = self._save_image(image, f"{rid}_{Path(filename).stem}_preview.png") if save_preview_image else None
-        detections = self._fast_detector.detect_and_decode(image)
+        detections = self._detect_objects(image, fast=True)
         objects = self._build_detection_objects(
             rid=rid,
             now=now,
@@ -137,6 +144,89 @@ class DetectionService:
             objects=objects,
             source_image={"width": int(image.shape[1]), "height": int(image.shape[0])},
         )
+
+    def _detect_objects(self, image: np.ndarray, fast: bool) -> list[OpenCVDataMatrixResult]:
+        detector = self._fast_detector if fast else self._detector
+        dm_detections = detector.detect_and_decode(image)
+
+        if not self._box_detection_enabled or self._box_detector is None or self._spatial_matcher is None:
+            return dm_detections
+
+        processed = preprocess_for_detection(image)
+        boxes = self._box_detector.detect(processed)
+        if not boxes:
+            return dm_detections
+
+        scan_results = [
+            ScanResult(
+                content=item.content,
+                bbox=item.bbox,
+                scanner_used=item.decoder_used,
+                scan_time_ms=item.scan_time_ms,
+                success=bool(item.content),
+            )
+            for item in dm_detections
+            if item.content
+        ]
+        match_results = self._spatial_matcher.match(boxes, scan_results)
+
+        merged: list[OpenCVDataMatrixResult] = []
+        matched_keys: set[tuple[str, tuple[int, int, int, int]]] = set()
+
+        for match in match_results:
+            if match.scan_result is not None:
+                matched_keys.add((match.scan_result.content, tuple(int(v) for v in match.scan_result.bbox)))
+                merged.append(
+                    OpenCVDataMatrixResult(
+                        content=match.scan_result.content,
+                        bbox=match.box.bbox,
+                        confidence=max(0.9, match.overlap_ratio),
+                        decoder_used=match.scan_result.scanner_used,
+                        detection_source="box-matched",
+                        scan_time_ms=match.scan_result.scan_time_ms,
+                    )
+                )
+            else:
+                merged.append(
+                    OpenCVDataMatrixResult(
+                        content="",
+                        bbox=match.box.bbox,
+                        confidence=0.35,
+                        decoder_used="box-detector",
+                        detection_source="box-only",
+                        scan_time_ms=0.0,
+                    )
+                )
+
+        for item in dm_detections:
+            key = (item.content, tuple(int(v) for v in item.bbox))
+            if item.content and key in matched_keys:
+                continue
+            merged.append(item)
+
+        return merged
+
+    @staticmethod
+    def _draw_object_overlays(image: np.ndarray, detections: list[OpenCVDataMatrixResult]) -> np.ndarray:
+        output = image.copy()
+        for index, detection in enumerate(detections, start=1):
+            x1, y1, x2, y2 = detection.bbox
+            decoded = bool(detection.content)
+            color = (34, 197, 94) if decoded else (0, 191, 255)
+            label = detection.content if decoded else f"Box {index}"
+            cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
+            text_y = y1 - 10 if y1 > 24 else y1 + 22
+            cv2.putText(
+                output,
+                label,
+                (x1, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+        return output
 
     def _build_detection_objects(
         self,
