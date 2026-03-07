@@ -239,12 +239,24 @@ export default function LiveDetectionPage() {
         getBrowserCameras(),
       ]);
 
-      const backendItems = backendResult.status === "fulfilled" ? backendResult.value : [];
-      const browserItems = browserResult.status === "fulfilled" ? browserResult.value : [];
+      // Defensive: ensure we always have arrays even if the API returns unexpected data.
+      const rawBackend = backendResult.status === "fulfilled" ? backendResult.value : undefined;
+      const rawBrowser = browserResult.status === "fulfilled" ? browserResult.value : undefined;
+      const backendItems: CameraInfo[] = Array.isArray(rawBackend) ? (rawBackend as CameraInfo[]) : [];
+      const browserItems: LiveCameraOption[] = Array.isArray(rawBrowser) ? rawBrowser : [];
+
+      // Log for debugging — visible in browser console.
+      console.debug("[refreshCameras] backendResult:", backendResult);
+      console.debug("[refreshCameras] browserResult:", browserResult);
+      console.debug("[refreshCameras] backendItems:", backendItems, "browserItems:", browserItems);
 
       if (backendResult.status === "rejected") {
         const msg = backendResult.reason instanceof Error ? backendResult.reason.message : "無法連線到後端";
         setError(`後端鏡頭載入失敗：${msg}`);
+      } else if (!Array.isArray(rawBackend)) {
+        // fetchCameras() resolved but returned non-array — log for diagnosis.
+        console.warn("[refreshCameras] fetchCameras() resolved with non-array:", rawBackend);
+        setError(`後端回應格式異常（非陣列）：${JSON.stringify(rawBackend)?.slice(0, 120)}`);
       }
 
       const items: LiveCameraOption[] = [
@@ -255,6 +267,7 @@ export default function LiveDetectionPage() {
         })),
       ];
 
+      console.debug("[refreshCameras] final items:", items);
       setCameras(items);
 
       const preferred = items.find((item) => item.id === selectedCameraId && item.available)
@@ -265,6 +278,7 @@ export default function LiveDetectionPage() {
       setSelectedCameraId(preferred?.id ?? "");
     } catch (err) {
       const message = err instanceof Error ? err.message : "無法取得鏡頭清單";
+      console.error("[refreshCameras] unexpected error:", err);
       setError(message);
     } finally {
       setIsLoadingCameras(false);
@@ -519,6 +533,18 @@ export default function LiveDetectionPage() {
                     </option>
                   ))}
                 </select>
+                <p className="text-xs text-muted-foreground">
+                  {isLoadingCameras
+                    ? "正在掃描鏡頭..."
+                    : cameras.length > 0
+                      ? `已偵測到 ${cameras.length} 個鏡頭（後端 ${cameras.filter((c) => c.sourceScope === "backend").length} 個，裝置 ${cameras.filter((c) => c.sourceScope === "browser").length} 個）`
+                      : "未偵測到任何鏡頭，請點擊「重新掃描鏡頭」"}
+                </p>
+                {error && !isLoadingCameras ? (
+                  <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                    ⚠ {error}
+                  </p>
+                ) : null}
               </div>
 
               <div className="space-y-2">
