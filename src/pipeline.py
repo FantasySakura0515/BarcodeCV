@@ -10,7 +10,7 @@ import cv2
 from .camera.camera_manager import CameraManager
 from .database.repository import BoxRecord, BoxRepository, ScanRecord, ScanRepository
 from .decoding.direct_scanner import CompositeScanner, ScanResult
-from .detection.box_detector import BoxDetectionResult
+from .detection.box_detector import BoxDetectionResult, BoxDetector
 from .detection.detector import YOLODetector
 from .detection.spatial_matcher import ScanSummary, SpatialMatcher
 from .utils.image_utils import enhance_contrast, sharpen
@@ -38,6 +38,7 @@ class ScanPipeline:
         repository: ScanRepository,
         config: dict,
         yolo_detector: YOLODetector | None = None,
+        box_detector: BoxDetector | None = None,
         spatial_matcher: SpatialMatcher | None = None,
         box_repo: BoxRepository | None = None,
     ):
@@ -49,6 +50,7 @@ class ScanPipeline:
         self._session_id: str | None = None
 
         self._yolo = yolo_detector
+        self._box_detector = box_detector
         self._spatial_matcher = spatial_matcher
         self._box_repo = box_repo
 
@@ -180,12 +182,14 @@ class ScanPipeline:
         return summary
 
     def _run_library_only(self, image, session_id, timestamp, image_path) -> ScanSummary:
-        """Fallback: scan entire image with library scanners (no YOLO)."""
-        logger.info("=== Library-only scan (no YOLO model) ===")
+        """Scan with library scanners + optional OpenCV box detection."""
+        logger.info("=== Library scan (pylibdmtx/zxing-cpp) ===")
         results = self._scanner.scan(image)
         successful = [r for r in results if r.success]
         logger.info("Found %d DataMatrix codes", len(successful))
 
+        # Persist scan records
+        scan_record_map: dict[str, int] = {}
         for r in successful:
             record = ScanRecord(
                 session_id=session_id,
@@ -201,7 +205,36 @@ class ScanPipeline:
                 wide_image_path=image_path,
                 closeup_image_path=None,
             )
-            self._repo.insert_scan(record)
+            row_id = self._repo.insert_scan(record)
+            scan_record_map[r.content] = row_id
+
+        # OpenCV box detection + spatial matching
+        if self._box_detector and self._spatial_matcher:
+            logger.info("=== OpenCV Box Detection ===")
+            boxes = self._box_detector.detect(image)
+            match_results = self._spatial_matcher.match(boxes, successful)
+
+            if self._box_repo:
+                for match in match_results:
+                    content = match.scan_result.content if match.scan_result else None
+                    scan_id = scan_record_map.get(content) if content else None
+                    box_record = BoxRecord(
+                        session_id=session_id,
+                        timestamp=timestamp,
+                        status=match.status,
+                        box_bbox_x1=match.box.bbox[0],
+                        box_bbox_y1=match.box.bbox[1],
+                        box_bbox_x2=match.box.bbox[2],
+                        box_bbox_y2=match.box.bbox[3],
+                        box_area=match.box.area,
+                        scan_record_id=scan_id,
+                        decoded_content=content,
+                        overlap_ratio=match.overlap_ratio,
+                        wide_image_path=image_path,
+                    )
+                    self._box_repo.insert_box(box_record)
+
+            return self._spatial_matcher.summarize(match_results, len(successful))
 
         return ScanSummary(
             matched=[], missing=[],
