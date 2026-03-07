@@ -18,7 +18,7 @@ from .database.db_manager import DatabaseManager
 from .database.repository import BoxRepository, ScanRepository
 from .decoding.decoder import DataMatrixDecoder, DecodeResult
 from .decoding.direct_scanner import CompositeScanner
-from .detection.box_detector import BoxDetector
+from .detection.detector import YOLODetector
 from .detection.spatial_matcher import ScanSummary, SpatialMatcher
 from .pipeline import ScanPipeline
 from .utils.config_loader import load_config
@@ -71,15 +71,20 @@ def _run_preview(config: dict):
 
     import cv2
 
-    from .detection.box_detector import BoxDetector
-    from .detection.preprocessor import preprocess_for_detection
+    from .detection.detector import YOLODetector
 
     logger = logging.getLogger("barcodecv")
 
     camera_manager = CameraManager.from_config(config)
 
-    box_cfg = config.get("box_detection", {})
-    box_detector = BoxDetector.from_config(config) if box_cfg.get("enabled", False) else None
+    # Load YOLO if available
+    det_cfg = config.get("detection", {})
+    yolo_enabled = det_cfg.get("enabled", False)
+    yolo = None
+    if yolo_enabled:
+        yolo = YOLODetector.from_config(config)
+        yolo.load_model()
+        logger.info("YOLO loaded for preview")
 
     with camera_manager:
         logger.info("Preview started — press 'q' to quit, 's' to scan")
@@ -91,15 +96,20 @@ def _run_preview(config: dict):
             global_img = global_frame.image.copy()
             local_img = local_frame.image.copy()
 
-            # Box detection overlay on global image (fast, no scanning)
-            if box_detector is not None:
-                processed = preprocess_for_detection(global_frame.image)
-                boxes = box_detector.detect(processed)
-                for i, box in enumerate(boxes):
-                    x1, y1, x2, y2 = box.bbox
-                    cv2.rectangle(global_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(global_img, f"Box {i+1}", (x1, y1 - 8),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # YOLO overlay on global image
+            if yolo is not None:
+                detections = yolo.detect(global_frame.image)
+                for det in detections:
+                    x1, y1, x2, y2 = det.bbox
+                    if det.class_name == "box":
+                        color = (0, 255, 0)  # green
+                        label = f"Box {det.confidence:.0%}"
+                    else:
+                        color = (255, 0, 0)  # blue
+                        label = f"DM {det.confidence:.0%}"
+                    cv2.rectangle(global_img, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(global_img, label, (x1, y1 - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
             # Labels
             cv2.putText(global_img, "Global (CAM0)", (10, 30),
@@ -121,15 +131,35 @@ def _run_preview(config: dict):
             if key == ord("q"):
                 break
             elif key == ord("s"):
-                # One-shot scan on current frame
+                # One-shot scan: YOLO detect + crop decode
                 logger.info("Scanning current frame...")
-                scanner = CompositeScanner.from_config(config)
-                results = scanner.scan(preprocess_for_detection(global_frame.image))
-                for r in results:
-                    if r.success:
-                        logger.info("  Found: %s (%s)", r.content, r.scanner_used)
-                if not any(r.success for r in results):
-                    logger.info("  No DataMatrix found")
+                if yolo:
+                    dets = yolo.detect(global_frame.image)
+                    dm_dets = [d for d in dets if d.class_name == "datamatrix"]
+                    scanner = CompositeScanner.from_config(config)
+                    found = 0
+                    for det in dm_dets:
+                        pad = 10
+                        ih, iw = global_frame.image.shape[:2]
+                        crop = global_frame.image[
+                            max(0, det.bbox[1]-pad):min(ih, det.bbox[3]+pad),
+                            max(0, det.bbox[0]-pad):min(iw, det.bbox[2]+pad),
+                        ]
+                        results = scanner.scan(crop)
+                        for r in results:
+                            if r.success:
+                                logger.info("  Found: %s (%s)", r.content, r.scanner_used)
+                                found += 1
+                    if found == 0:
+                        logger.info("  No DataMatrix decoded")
+                else:
+                    scanner = CompositeScanner.from_config(config)
+                    results = scanner.scan(global_frame.image)
+                    for r in results:
+                        if r.success:
+                            logger.info("  Found: %s (%s)", r.content, r.scanner_used)
+                    if not any(r.success for r in results):
+                        logger.info("  No DataMatrix found")
 
         cv2.destroyAllWindows()
         logger.info("Preview stopped")
@@ -148,26 +178,29 @@ def _run_scanning(config: dict, mode: str):
         wal_mode=config["database"].get("wal_mode", True),
     )
 
-    # Box detection (optional — enabled by config)
-    box_cfg = config.get("box_detection", {})
-    box_detection_enabled = box_cfg.get("enabled", False)
-    box_detector = BoxDetector.from_config(config) if box_detection_enabled else None
-    spatial_matcher = SpatialMatcher.from_config(config) if box_detection_enabled else None
+    # YOLO detection (optional — requires trained model)
+    det_cfg = config.get("detection", {})
+    yolo_enabled = det_cfg.get("enabled", False)
+    yolo_detector = None
+    if yolo_enabled:
+        yolo_detector = YOLODetector.from_config(config)
+        yolo_detector.load_model()
+        logger.info("YOLO detection: enabled (%s)", det_cfg.get("model_path"))
+
+    spatial_matcher = SpatialMatcher.from_config(config) if yolo_enabled else None
 
     logger.info("Using scanner: %s", scanner.name())
-    if box_detection_enabled:
-        logger.info("Box detection: enabled")
 
     with camera_manager, db_manager:
         repo = ScanRepository(db_manager.get_connection())
-        box_repo = BoxRepository(db_manager.get_connection()) if box_detection_enabled else None
+        box_repo = BoxRepository(db_manager.get_connection()) if yolo_enabled else None
 
         pipeline = ScanPipeline(
             camera_manager=camera_manager,
             scanner=scanner,
             repository=repo,
             config=config,
-            box_detector=box_detector,
+            yolo_detector=yolo_detector,
             spatial_matcher=spatial_matcher,
             box_repo=box_repo,
         )

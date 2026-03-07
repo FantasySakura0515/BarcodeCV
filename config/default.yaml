@@ -64,15 +64,15 @@ box_detection:
 spatial_matching:
   overlap_threshold: 0.3  # minimum IoU to count a DataMatrix as inside a box
 
-# --- OPTIONAL: YOLO-based detection (only needed if library scanning is insufficient) ---
-# Uncomment and configure if you want to train a custom YOLO model for detection.
-# This is useful when codes are very small/distant and pylibdmtx/zxing can't find them.
-#
-# detection:
-#   model_path: "./models/datamatrix_best.pt"
-#   model_format: "pt"            # "pt", "ncnn", "onnx"
-#   confidence_threshold: 0.5
-#   iou_threshold: 0.45
-#   imgsz: 640
-#   device: "cpu"
-#   max_detections: 50
+# --- YOLO detection (detects both boxes and DataMatrix) ---
+# Set enabled: true after training a model. Classes: 0=box, 1=datamatrix
+# Without YOLO, falls back to library-only scanning (pylibdmtx + zxing-cpp).
+detection:
+  enabled: false                    # set to true when you have a trained model
+  model_path: "./models/best.pt"
+  confidence_threshold: 0.5
+  iou_threshold: 0.45
+  imgsz: 640
+  device: "cpu"
+  max_detections: 50
+  crop_padding: 10                  # pixels of padding when cropping DataMatrix regions

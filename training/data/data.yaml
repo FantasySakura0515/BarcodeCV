@@ -3,6 +3,7 @@ train: images/train
 val: images/val
 test: images/test
 
-nc: 1
+nc: 2
 names:
-  0: datamatrix
+  0: box
+  1: datamatrix
