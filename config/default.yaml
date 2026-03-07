@@ -28,12 +28,12 @@ decoding:
   merge_results: true             # merge results from both scanners
   pylibdmtx:
     timeout_ms: 5000              # higher timeout = finds more codes (used for capture/batch)
-    fast_timeout_ms: 3000         # timeout for live-preview mode (trade-off: speed vs accuracy)
+    fast_timeout_ms: 2000         # live-preview timeout — balanced between speed and accuracy
     # max_count: null             # null = find all codes (no limit)
     shrink: 1                     # 1 = full resolution, 2+ = faster but may miss small codes
     threshold: 50
     min_edge: 6                   # minimum edge size (px) — lower finds smaller codes
-    max_edge: 300                 # maximum edge size (px) — higher finds larger codes
+    max_edge: 400                 # maximum edge size (px) — raised to catch larger codes in close-up
   zxing:
     formats: ["DataMatrix"]
   preprocessing:
@@ -71,9 +71,12 @@ box_detection:
   aspect_ratio_max: 2.4
 
 spatial_matching:
-  overlap_threshold: 0.6  # minimum IoU to count a DataMatrix as inside a box
+  overlap_threshold: 0.3  # minimum IoU to count a DataMatrix as inside a box
 
 opencv_datamatrix:
+  # Maximum candidate regions for fast (live) mode. Keeps latency under ~3s.
+  # Full batch mode uses max_candidates (below) for exhaustive search.
+  fast_max_candidates: 35
   min_area: 40
   max_area_ratio: 0.4
   adaptive_block_size: 31
@@ -86,7 +89,7 @@ opencv_datamatrix:
   max_candidates: 150
   clahe_clip_limit: 3.0
   fallback_full_image: true
-  min_output_confidence: 0.6  # hide / do not return results below 60%
+  min_output_confidence: 0.45  # lower threshold to surface weak-but-valid detections on low-quality images
 
 # --- OPTIONAL: YOLO-based detection (only needed if library scanning is insufficient) ---
 # Uncomment and configure if you want to train a custom YOLO model for detection.

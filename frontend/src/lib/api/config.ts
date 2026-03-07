@@ -47,5 +47,14 @@ export function resolveApiAssetUrl(path: string | null | undefined) {
     return path;
   }
 
-  return `${getBackendOrigin()}${path.startsWith("/") ? path : `/${path}`}`;
+  const normalised = path.startsWith("/") ? path : `/${path}`;
+
+  // Paths that start with /api/ are served by the Next.js proxy on the same
+  // origin — return them as relative paths so the browser never hits the
+  // Python backend port directly (avoids ERR_CONNECTION_REFUSED).
+  if (normalised.startsWith("/api/")) {
+    return normalised;
+  }
+
+  return `${getBackendOrigin()}${normalised}`;
 }

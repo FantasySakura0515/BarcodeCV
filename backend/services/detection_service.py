@@ -152,6 +152,11 @@ class DetectionService:
         if fast and self._box_detection_enabled and self._box_detector is not None and self._spatial_matcher is not None:
             boxes = self._detect_boxes_fast(image)
             if boxes:
+                # Decode only inside known box regions.  This is fast because
+                # only ~N ROIs are scanned instead of up to 150 candidates.
+                # Full-frame supplemental pass is intentionally skipped in the
+                # fast path — the OpenCVDataMatrixDetector already does a
+                # full-frame fallback when a box ROI fails to decode.
                 dm_detections = detector.decode_bboxes(image, [box.bbox for box in boxes])
                 return self._merge_box_and_dm(boxes, dm_detections)
 

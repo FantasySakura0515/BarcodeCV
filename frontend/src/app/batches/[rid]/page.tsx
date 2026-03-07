@@ -6,7 +6,6 @@ import { SectionCard } from "@/components/common/section-card";
 import { DetectionCanvas } from "@/components/detection/detection-canvas";
 import { ObjectResultTable } from "@/components/detection/object-result-table";
 import { fetchBatch } from "@/lib/api/client";
-import { resolveApiAssetUrl } from "@/lib/api/config";
 
 export default async function BatchDetailPage({ params }: { params: Promise<{ rid: string }> }) {
   const { rid } = await params;
@@ -16,7 +15,12 @@ export default async function BatchDetailPage({ params }: { params: Promise<{ ri
     notFound();
   }
 
-  const previewImageUrl = resolveApiAssetUrl(batch.objects[0]?.imagePath);
+  // Use the imagePath as-is: the backend stores it as "/api/images/xxx.png",
+  // which is served by the Next.js proxy route and works in the browser.
+  // Do NOT call resolveApiAssetUrl here — this is a server component and
+  // resolveApiAssetUrl would prepend the backend origin (e.g. http://127.0.0.1:8000),
+  // causing the browser to hit the Python port directly (ERR_CONNECTION_REFUSED).
+  const previewImageUrl = batch.objects[0]?.imagePath ?? null;
 
   return (
     <div className="space-y-6">

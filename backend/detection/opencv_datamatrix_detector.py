@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
 import cv2
 import numpy as np
@@ -50,6 +53,19 @@ class OpenCVDataMatrixDetector:
 		fallback_full_image: bool = True,
 		max_roi_scan_variants: int = 6,
 		max_full_frame_scan_variants: int = 6,
+		# When True (accuracy mode): full-frame scan is ALWAYS run and its results
+		# supplement any codes already found by ROI scanning.
+		# When False (speed mode): full-frame only runs when ROI found NOTHING.
+		full_frame_always_supplement: bool = False,
+		# Stop scanning candidates once this many codes are found (0 = no limit).
+		# Set to expected barcode count for fast early exit.
+		early_exit_count: int = 0,
+		# Use fewer candidate-detection passes (fast mode: 1 path vs 7 paths).
+		fast_candidate_detection: bool = False,
+		# Number of threads for parallel ROI scanning.  0 = sequential.
+		# zxing-cpp releases the GIL so threads run in true parallel on multi-core.
+		# Recommended: min(4, cpu_count) for live mode; 0 for batch mode.
+		parallel_workers: int = 0,
 	):
 		self._scanner = scanner
 		self._min_area = min_area
@@ -66,6 +82,10 @@ class OpenCVDataMatrixDetector:
 		self._fallback_full_image = fallback_full_image
 		self._max_roi_scan_variants = max_roi_scan_variants
 		self._max_full_frame_scan_variants = max_full_frame_scan_variants
+		self._full_frame_always_supplement = full_frame_always_supplement
+		self._early_exit_count = early_exit_count
+		self._fast_candidate_detection = fast_candidate_detection
+		self._parallel_workers = parallel_workers
 
 	def detect_and_decode(self, image: np.ndarray) -> list[OpenCVDataMatrixResult]:
 		start = time.perf_counter()
@@ -73,47 +93,51 @@ class OpenCVDataMatrixDetector:
 		max_area = max(int(h * w * self._max_area_ratio), self._min_area)
 
 		candidates = self._detect_candidates(image, max_area=max_area)
-		results: list[OpenCVDataMatrixResult] = []
 
-		for bbox in candidates:
-			x1, y1, x2, y2 = self._expand_bbox(bbox, image.shape)
-			roi = crop_region(image, (x1, y1, x2, y2))
-			decoded = self._scan_roi_variants(roi)
-			for item in decoded:
-				if not item.success or not item.content:
-					continue
-				global_bbox = (
-					x1 + int(item.bbox[0]),
-					y1 + int(item.bbox[1]),
-					x1 + int(item.bbox[2]),
-					y1 + int(item.bbox[3]),
-				)
-				results.append(
-					OpenCVDataMatrixResult(
-						content=item.content,
-						bbox=global_bbox,
-						confidence=0.95,
-						decoder_used=item.scanner_used,
-						detection_source="opencv-roi",
-						scan_time_ms=item.scan_time_ms,
-					)
-				)
+		# --- Parallel ROI scanning -------------------------------------------
+		# Flat task pool: pre-compute all (candidate × variant) images on the
+		# main thread (OpenCV, fast), then submit ALL zxing scan tasks at once.
+		# Example: 35 candidates × 3 variants = 105 tasks, 8 workers →
+		# ceil(105/8) = 14 parallel rounds × ~15ms = ~210ms
+		# vs sequential: ceil(35/4) rounds × avg_variants × 15ms ≈ 270–405ms
+		if self._parallel_workers > 1 and candidates:
+			results = self._scan_candidates_flat_parallel(image, candidates)
+		else:
+			# Sequential path (batch mode or single-core).
+			results = self._scan_candidates_sequential(image, candidates)
 
-		if self._fallback_full_image and not results:
-			decoded_full = self._scan_full_frame_variants(image)
-			for item in decoded_full:
-				if not item.success or not item.content:
-					continue
-				results.append(
-					OpenCVDataMatrixResult(
-						content=item.content,
-						bbox=tuple(int(v) for v in item.bbox),
-						confidence=0.88,
-						decoder_used=item.scanner_used,
-						detection_source="full-frame",
-						scan_time_ms=item.scan_time_ms,
-					)
+		if self._fallback_full_image:
+			# Speed mode (full_frame_always_supplement=False):
+			#   Full-frame scan only runs when ROI found NOTHING.  Keeps latency
+			#   low for live preview.  If ROI found some codes, it's good enough.
+			# Accuracy mode (full_frame_always_supplement=True):
+			#   Full-frame scan always runs and supplements ROI results with any
+			#   codes whose contours were missed (blur, compression artefacts, etc.).
+			#   Used in batch/capture mode where latency is less critical.
+			run_full_frame = self._full_frame_always_supplement or not results
+			if run_full_frame:
+				already_found = {r.content for r in results if r.content}
+				decoded_full = (
+					self._scan_full_frame_variants_parallel(image)
+					if self._parallel_workers > 1
+					else self._scan_full_frame_variants(image)
 				)
+				for item in decoded_full:
+					if not item.success or not item.content:
+						continue
+					if item.content in already_found:
+						continue
+					already_found.add(item.content)
+					results.append(
+						OpenCVDataMatrixResult(
+							content=item.content,
+							bbox=tuple(int(v) for v in item.bbox),
+							confidence=0.88,
+							decoder_used=item.scanner_used,
+							detection_source="full-frame",
+							scan_time_ms=item.scan_time_ms,
+						)
+					)
 
 		merged = self._deduplicate(results)
 		elapsed = (time.perf_counter() - start) * 1000
@@ -125,6 +149,251 @@ class OpenCVDataMatrixDetector:
 		)
 		return merged
 
+	def _scan_candidates_sequential(
+		self,
+		image: np.ndarray,
+		candidates: list[tuple[int, int, int, int]],
+	) -> list[OpenCVDataMatrixResult]:
+		"""Process ROI candidates one-by-one with early exit support."""
+		results: list[OpenCVDataMatrixResult] = []
+		found_contents: set[str] = set()
+
+		for bbox in candidates:
+			if self._early_exit_count > 0 and len(found_contents) >= self._early_exit_count:
+				logger.debug("Early exit after finding %d codes", len(found_contents))
+				break
+
+			x1, y1, x2, y2 = self._expand_bbox(bbox, image.shape)
+			roi = crop_region(image, (x1, y1, x2, y2))
+			gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+			decoded = self._scan_roi_variants(roi, gray_roi)
+			for item in decoded:
+				if not item.success or not item.content:
+					continue
+				if item.content in found_contents:
+					continue
+				found_contents.add(item.content)
+				results.append(OpenCVDataMatrixResult(
+					content=item.content,
+					bbox=(x1 + int(item.bbox[0]), y1 + int(item.bbox[1]), x1 + int(item.bbox[2]), y1 + int(item.bbox[3])),
+					confidence=0.95,
+					decoder_used=item.scanner_used,
+					detection_source="opencv-roi",
+					scan_time_ms=item.scan_time_ms,
+				))
+		return results
+
+	def _precompute_roi_variant_images(
+		self,
+		roi: np.ndarray,
+		gray: np.ndarray,
+	) -> list[np.ndarray]:
+		"""Eagerly compute all preprocessing variants for one ROI.
+
+		Called on the main thread before submitting zxing scans to the pool.
+		For small ROIs (≤200×200 px) all variants complete in < 10ms total.
+		Returns a list of pre-processed images (up to max_roi_scan_variants).
+		"""
+		variant_fns: list = [
+			lambda: roi,
+			lambda: self._enhance_from_gray(gray),
+			lambda: self._unsharp_mask_gray(gray),
+			lambda: self._invert_variant(roi),
+			lambda: self._bilateral_variant_gray(gray),
+			lambda: self._invert_variant(self._enhance_from_gray(gray)),
+			lambda: self._morphological_sharpen_gray(gray),
+			lambda: self._jpeg_artifact_variant_gray(gray),
+		]
+		if min(roi.shape[:2]) < 320:
+			variant_fns += [
+				lambda: self._resize_variant(roi, scale=2.0),
+				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=2.0),
+				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
+				lambda: self._resize_variant(self._jpeg_artifact_variant_gray(gray), scale=2.0),
+			]
+		# Evaluate eagerly — only as many as we'll actually scan.
+		return [fn() for fn in variant_fns[: self._max_roi_scan_variants]]
+
+	def _scan_candidates_flat_parallel(
+		self,
+		image: np.ndarray,
+		candidates: list[tuple[int, int, int, int]],
+	) -> list[OpenCVDataMatrixResult]:
+		"""Flat task pool: one zxing scan task per (candidate × variant).
+
+		Phase 1 (main thread): crop ROI, compute gray, evaluate all preprocessing
+		  variant images.  OpenCV is fast for small ROIs (≤10 ms total for 3
+		  variants of a 150×150 ROI).
+		Phase 2 (thread pool): submit every pre-processed image as an independent
+		  zxing scan task.  zxing-cpp releases the GIL → true parallelism.
+
+		With 35 candidates × 3 variants = 105 tasks and 8 workers the pool runs
+		ceil(105/8) = 14 parallel rounds instead of the old ceil(35/4)×avg_variants
+		≈ 27 sequential rounds.
+		"""
+		# Phase 1: pre-compute all variant images on main thread.
+		all_tasks: list[tuple[int, int, np.ndarray]] = []  # (x1, y1, variant_img)
+		for bbox in candidates:
+			x1, y1, x2, y2 = self._expand_bbox(bbox, image.shape)
+			roi = crop_region(image, (x1, y1, x2, y2))
+			if roi.size == 0:
+				continue
+			gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+			for vi in self._precompute_roi_variant_images(roi, gray_roi):
+				all_tasks.append((x1, y1, vi))
+
+		if not all_tasks:
+			return []
+
+		# Phase 2: flat parallel zxing scans.
+		results: list[OpenCVDataMatrixResult] = []
+		lock = threading.Lock()
+		found_contents: set[str] = set()
+		abort = threading.Event()
+
+		def _scan_task(task: tuple[int, int, np.ndarray]) -> None:
+			if abort.is_set():
+				return
+			x1, y1, variant_img = task
+			decoded = self._scanner.scan(variant_img)
+			for item in decoded:
+				if not item.success or not item.content:
+					continue
+				with lock:
+					if item.content in found_contents:
+						continue
+					found_contents.add(item.content)
+					if self._early_exit_count > 0 and len(found_contents) >= self._early_exit_count:
+						abort.set()
+					results.append(OpenCVDataMatrixResult(
+						content=item.content,
+						bbox=(
+							x1 + int(item.bbox[0]),
+							y1 + int(item.bbox[1]),
+							x1 + int(item.bbox[2]),
+							y1 + int(item.bbox[3]),
+						),
+						confidence=0.95,
+						decoder_used=item.scanner_used,
+						detection_source="opencv-roi",
+						scan_time_ms=item.scan_time_ms,
+					))
+
+		with ThreadPoolExecutor(max_workers=self._parallel_workers) as pool:
+			list(pool.map(_scan_task, all_tasks))
+
+		return results
+
+	def _scan_full_frame_variants_parallel(self, image: np.ndarray) -> list:
+		"""Run all full-frame preprocessing variants in parallel.
+
+		Submits (preprocess_fn + zxing_scan) as one task per variant so that
+		both the heavy OpenCV ops (CLAHE, bilateral, etc.) AND zxing scanning
+		run concurrently.  OpenCV C++ extensions release the GIL during
+		compute-heavy operations, giving true multi-core parallelism.
+
+		With 4 variants and 4+ workers all 4 variants run simultaneously,
+		reducing full-frame fallback latency by ~4×.
+		"""
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+
+		# Each fn is evaluated inside the worker — preprocessing is parallel too.
+		variant_fns = [
+			lambda: image,
+			lambda: self._enhance_from_gray(gray),
+			lambda: self._unsharp_mask_gray(gray),
+			lambda: self._bilateral_variant_gray(gray),
+			lambda: self._jpeg_artifact_variant_gray(gray),
+			lambda: self._invert_variant(image),
+			lambda: self._binary_variant_gray(gray),
+			lambda: self._denoise_variant_gray(gray),
+			lambda: self._morphological_sharpen_gray(gray),
+			lambda: self._invert_variant(self._enhance_from_gray(gray)),
+		][: self._max_full_frame_scan_variants]
+
+		all_results: list = []
+		lock = threading.Lock()
+		found: set[str] = set()
+
+		def _scan_ff(vfn) -> None:
+			scanned = self._scanner.scan(vfn())
+			for item in scanned:
+				if not item.success or not item.content:
+					continue
+				with lock:
+					if item.content not in found:
+						found.add(item.content)
+						all_results.append(item)
+
+		workers = min(self._parallel_workers, len(variant_fns))
+		with ThreadPoolExecutor(max_workers=workers) as pool:
+			list(pool.map(_scan_ff, variant_fns))
+
+		return all_results
+
+	def _scan_candidates_parallel(
+		self,
+		image: np.ndarray,
+		candidates: list[tuple[int, int, int, int]],
+	) -> list[OpenCVDataMatrixResult]:
+		"""Fan out ROI candidates across a thread pool.
+
+		zxing-cpp releases the Python GIL during barcode reading, so multiple
+		threads run in true parallel on multi-core hardware (Pi 5 = 4 cores).
+		Expected speedup: ~min(workers, candidates) times faster than sequential.
+
+		Early exit: a threading.Event is shared across workers.  Once we have
+		enough codes (early_exit_count), the event is set and remaining workers
+		skip their scan step immediately.
+		"""
+		results: list[OpenCVDataMatrixResult] = []
+		lock = threading.Lock()
+		found_contents: set[str] = set()
+		abort = threading.Event()
+
+		def _worker(bbox: tuple[int, int, int, int]) -> list[OpenCVDataMatrixResult]:
+			if abort.is_set():
+				return []
+			x1, y1, x2, y2 = self._expand_bbox(bbox, image.shape)
+			roi = crop_region(image, (x1, y1, x2, y2))
+			if roi.size == 0:
+				return []
+			gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+			# _scan_roi_variants is stateless (reads only self._* scalars and calls
+			# self._scanner.scan which is thread-safe for zxing-cpp).
+			decoded = self._scan_roi_variants(roi, gray_roi)
+			local_new: list[OpenCVDataMatrixResult] = []
+			for item in decoded:
+				if not item.success or not item.content:
+					continue
+				with lock:
+					if item.content in found_contents:
+						continue
+					found_contents.add(item.content)
+					if self._early_exit_count > 0 and len(found_contents) >= self._early_exit_count:
+						abort.set()
+				local_new.append(OpenCVDataMatrixResult(
+					content=item.content,
+					bbox=(x1 + int(item.bbox[0]), y1 + int(item.bbox[1]), x1 + int(item.bbox[2]), y1 + int(item.bbox[3])),
+					confidence=0.95,
+					decoder_used=item.scanner_used,
+					detection_source="opencv-roi",
+					scan_time_ms=item.scan_time_ms,
+				))
+			return local_new
+
+		with ThreadPoolExecutor(max_workers=self._parallel_workers) as pool:
+			futures: list[Future[list[OpenCVDataMatrixResult]]] = [
+				pool.submit(_worker, bbox) for bbox in candidates
+			]
+			for fut in as_completed(futures):
+				try:
+					results.extend(fut.result())
+				except Exception as exc:  # noqa: BLE001
+					logger.warning("Parallel ROI worker failed: %s", exc)
+
+		return results
+
 	def decode_bboxes(
 		self,
 		image: np.ndarray,
@@ -134,14 +403,19 @@ class OpenCVDataMatrixDetector:
 
 		Used by the live pipeline to avoid expensive full-frame scanning.
 		Each input bbox is expanded by detector padding before ROI decode.
+		Respects parallel_workers for thread-pool acceleration.
 		"""
+		if self._parallel_workers > 1 and bboxes:
+			return self._scan_candidates_flat_parallel(image, bboxes)
+
 		results: list[OpenCVDataMatrixResult] = []
 		for bbox in bboxes:
 			x1, y1, x2, y2 = self._expand_bbox(bbox, image.shape)
 			roi = crop_region(image, (x1, y1, x2, y2))
 			if roi.size == 0:
 				continue
-			decoded = self._scan_roi_variants(roi)
+			gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+			decoded = self._scan_roi_variants(roi, gray_roi)
 			for item in decoded:
 				if not item.success or not item.content:
 					continue
@@ -162,28 +436,40 @@ class OpenCVDataMatrixDetector:
 				)
 		return self._deduplicate(results)
 
-	def _scan_roi_variants(self, roi: np.ndarray) -> list:
+	def _scan_roi_variants(self, roi: np.ndarray, gray: np.ndarray | None = None) -> list:
 		"""Try progressively more aggressive preprocessing until a code is found.
 
 		Variants are ordered cheapest-first. `max_roi_scan_variants` caps how
 		many variants are attempted (use 1-2 for live/fast mode, 6+ for batch).
-		Includes blur-resistant variants (unsharp mask, bilateral, morphological).
+		Includes blur-resistant variants (unsharp mask, bilateral, morphological,
+		JPEG artifact suppression).
+
+		``gray`` is a pre-computed grayscale of ``roi``.  Pass it in to avoid
+		repeating the BGR→GRAY conversion for every variant.
 		"""
+		if gray is None:
+			gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+
 		variants: list = [
 			lambda: roi,
-			lambda: self._enhance_for_decode(roi),
-			lambda: self._unsharp_mask(roi),
+			lambda: self._enhance_from_gray(gray),
+			lambda: self._unsharp_mask_gray(gray),
 			lambda: self._invert_variant(roi),
-			lambda: self._bilateral_variant(roi),
-			lambda: self._invert_variant(self._enhance_for_decode(roi)),
-			lambda: self._morphological_sharpen(roi),
+			lambda: self._bilateral_variant_gray(gray),
+			lambda: self._invert_variant(self._enhance_from_gray(gray)),
+			lambda: self._morphological_sharpen_gray(gray),
+			lambda: self._jpeg_artifact_variant_gray(gray),
 		]
-		# Upscale variants — only useful if ROI is small
-		if min(roi.shape[:2]) < 160:
+		# Upscale variants: useful when ROI is small OR when image was downscaled
+		# before reaching this stage (e.g. live mode at 35-65% resolution).
+		# Threshold raised from 160 to 320 to catch codes that are physically
+		# large but blurry / JPEG-compressed.
+		if min(roi.shape[:2]) < 320:
 			variants += [
 				lambda: self._resize_variant(roi, scale=2.0),
-				lambda: self._resize_variant(self._unsharp_mask(roi), scale=2.0),
-				lambda: self._resize_variant(self._enhance_for_decode(roi), scale=2.0),
+				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=2.0),
+				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
+				lambda: self._resize_variant(self._jpeg_artifact_variant_gray(gray), scale=2.0),
 			]
 
 		for variant_fn in variants[: self._max_roi_scan_variants]:
@@ -198,16 +484,19 @@ class OpenCVDataMatrixDetector:
 
 		Includes blur-resistant variants for distant/out-of-focus shots.
 		"""
+		# Pre-compute gray once for all full-frame variants.
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
 		all_variants = [
 			lambda: image,
-			lambda: self._enhance_for_decode(image),
-			lambda: self._unsharp_mask(image),
-			lambda: self._bilateral_variant(image),
+			lambda: self._enhance_from_gray(gray),
+			lambda: self._unsharp_mask_gray(gray),
+			lambda: self._bilateral_variant_gray(gray),
+			lambda: self._jpeg_artifact_variant_gray(gray),
 			lambda: self._invert_variant(image),
-			lambda: self._binary_variant(image),
-			lambda: self._denoise_variant(image),
-			lambda: self._morphological_sharpen(image),
-			lambda: self._invert_variant(self._enhance_for_decode(image)),
+			lambda: self._binary_variant_gray(gray),
+			lambda: self._denoise_variant_gray(gray),
+			lambda: self._morphological_sharpen_gray(gray),
+			lambda: self._invert_variant(self._enhance_from_gray(gray)),
 		]
 		for variant_fn in all_variants[: self._max_full_frame_scan_variants]:
 			results = self._scanner.scan(variant_fn())
@@ -217,12 +506,17 @@ class OpenCVDataMatrixDetector:
 		return []
 
 	def _enhance_for_decode(self, image: np.ndarray) -> np.ndarray:
-		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
+		"""BGR or gray image → sharpened+CLAHE BGR.  Kept for external callers."""
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+		return self._enhance_from_gray(gray)
+
+	def _enhance_from_gray(self, gray: np.ndarray) -> np.ndarray:
+		"""CLAHE + sharpen kernel on a pre-computed grayscale image."""
 		clahe = cv2.createCLAHE(clipLimit=max(self._clahe_clip_limit, 3.0), tileGridSize=(8, 8))
-		gray = clahe.apply(gray)
+		enhanced = clahe.apply(gray)
 		sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
-		gray = cv2.filter2D(gray, -1, sharpen_kernel)
-		return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+		enhanced = cv2.filter2D(enhanced, -1, sharpen_kernel)
+		return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
 	@staticmethod
 	def _invert_variant(image: np.ndarray) -> np.ndarray:
@@ -231,32 +525,87 @@ class OpenCVDataMatrixDetector:
 
 	@staticmethod
 	def _denoise_variant(image: np.ndarray) -> np.ndarray:
-		"""Apply non-local means denoising — helps for blurry/noisy images."""
-		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
-		denoised = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+		"""Kept for external callers; internally use _denoise_variant_gray."""
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+		return OpenCVDataMatrixDetector._denoise_variant_gray(gray)
+
+	@staticmethod
+	def _denoise_variant_gray(gray: np.ndarray) -> np.ndarray:
+		"""Median blur denoising — 30x faster than NLM for live mode.
+
+		medianBlur(k=5) effectively suppresses JPEG block noise and salt-and-pepper
+		artefacts while preserving the sharp edges of the DataMatrix finder
+		pattern.  fastNlMeansDenoising was replaced here because NLM is O(n²)
+		per pixel (≈500ms per ROI) versus O(k²) for median (≈4ms per ROI).
+		"""
+		denoised = cv2.medianBlur(gray, 5)
 		return cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR)
 
 	@staticmethod
+	def _jpeg_artifact_variant(image: np.ndarray) -> np.ndarray:
+		"""Kept for external callers; internally use _jpeg_artifact_variant_gray."""
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+		return OpenCVDataMatrixDetector._jpeg_artifact_variant_gray(gray)
+
+	@staticmethod
+	def _jpeg_artifact_variant_gray(gray: np.ndarray) -> np.ndarray:
+		"""Suppress JPEG block artifacts then boost contrast.
+
+		medianBlur(k=5) removes 8×8 block artefacts in roughly 4ms (vs 500ms
+		for fastNlMeansDenoising).  A fine-tiled CLAHE (4×4) then restores the
+		module contrast that JPEG compression degraded, and a mild sharpen kernel
+		re-emphasises the quiet-zone/finder boundary.
+		"""
+		# Step 1: remove block artefacts (cheap median filter)
+		denoised = cv2.medianBlur(gray, 5)
+		# Step 2: fine-tiled CLAHE for local contrast enhancement
+		clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
+		enhanced = clahe.apply(denoised)
+		# Step 3: mild sharpen to re-emphasise module edges
+		sharp_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+		sharpened = cv2.filter2D(enhanced, -1, sharp_kernel)
+		return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+
+	@staticmethod
 	def _unsharp_mask(image: np.ndarray, sigma: float = 1.0, strength: float = 1.5) -> np.ndarray:
+		"""Kept for external callers; internally use _unsharp_mask_gray."""
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+		return OpenCVDataMatrixDetector._unsharp_mask_gray(gray, sigma, strength)
+
+	@staticmethod
+	def _unsharp_mask_gray(gray: np.ndarray, sigma: float = 1.0, strength: float = 1.5) -> np.ndarray:
 		"""Unsharp masking — effective against mild motion/focus blur."""
-		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
 		blurred = cv2.GaussianBlur(gray, (0, 0), sigma)
 		sharpened = cv2.addWeighted(gray, 1.0 + strength, blurred, -strength, 0)
 		return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
 
 	@staticmethod
 	def _bilateral_variant(image: np.ndarray) -> np.ndarray:
-		"""Bilateral filter — edge-preserving smoothing followed by CLAHE contrast."""
-		filtered = cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
-		gray = cv2.cvtColor(filtered, cv2.COLOR_BGR2GRAY) if len(filtered.shape) == 3 else filtered.copy()
+		"""Kept for external callers; internally use _bilateral_variant_gray."""
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+		return OpenCVDataMatrixDetector._bilateral_variant_gray(gray)
+
+	@staticmethod
+	def _bilateral_variant_gray(gray: np.ndarray) -> np.ndarray:
+		"""Bilateral filter — edge-preserving smoothing followed by CLAHE contrast.
+
+		d=5 instead of d=9: complexity is O(d²) per pixel, so d=5 is ~3x faster
+		(25 vs 81 operations per pixel) with minimal quality loss for DataMatrix.
+		"""
+		filtered = cv2.bilateralFilter(gray, d=5, sigmaColor=50, sigmaSpace=50)
 		clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-		enhanced = clahe.apply(gray)
+		enhanced = clahe.apply(filtered)
 		return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
 	@staticmethod
 	def _morphological_sharpen(image: np.ndarray) -> np.ndarray:
+		"""Kept for external callers; internally use _morphological_sharpen_gray."""
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+		return OpenCVDataMatrixDetector._morphological_sharpen_gray(gray)
+
+	@staticmethod
+	def _morphological_sharpen_gray(gray: np.ndarray) -> np.ndarray:
 		"""Morphological sharpening — extracts edge detail from blurry images."""
-		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
 		kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 		dilated = cv2.dilate(gray, kernel)
 		eroded = cv2.erode(gray, kernel)
@@ -267,10 +616,13 @@ class OpenCVDataMatrixDetector:
 		return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
 
 	def _binary_variant(self, image: np.ndarray) -> np.ndarray:
-		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
-		gray = cv2.GaussianBlur(gray, (3, 3), 0)
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+		return self._binary_variant_gray(gray)
+
+	def _binary_variant_gray(self, gray: np.ndarray) -> np.ndarray:
+		blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 		binary = cv2.adaptiveThreshold(
-			gray,
+			blurred,
 			255,
 			cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
 			cv2.THRESH_BINARY,
@@ -313,13 +665,6 @@ class OpenCVDataMatrixDetector:
 		clahe = cv2.createCLAHE(clipLimit=self._clahe_clip_limit, tileGridSize=(8, 8))
 		enhanced = clahe.apply(blurred)
 
-		# Run adaptive thresholding at multiple block sizes to catch
-		# both fine-grained and coarser patterns (important for blurry images)
-		block_sizes = [self._adaptive_block_size]
-		for alt in [15, 51, 71]:
-			if alt != self._adaptive_block_size:
-				block_sizes.append(alt)
-
 		kernel = cv2.getStructuringElement(
 			cv2.MORPH_RECT,
 			(self._morph_kernel_size, self._morph_kernel_size),
@@ -327,32 +672,56 @@ class OpenCVDataMatrixDetector:
 
 		all_candidates: list[tuple[int, int, int, int]] = []
 
-		# --- Path 1: adaptive threshold (works well on sharp images) ---
-		for block_size in block_sizes:
+		if self._fast_candidate_detection:
+			# Fast mode: single adaptive-threshold pass + one Canny pass.
+			# Skips 5 of the 7 processing paths used in accuracy mode, saving
+			# roughly 60% of the candidate-detection time.
 			binary = cv2.adaptiveThreshold(
-				enhanced,
-				255,
-				cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-				cv2.THRESH_BINARY,
-				block_size,
-				self._adaptive_c,
+				enhanced, 255,
+				cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
+				self._adaptive_block_size, self._adaptive_c,
 			)
 			binary = cv2.bitwise_not(binary)
 			morphed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
 			self._extract_contour_candidates(morphed, max_area, all_candidates)
 
-		# --- Path 2: Canny edge detection (better for blurry/distant images) ---
-		for low_t, high_t in [(30, 100), (50, 150)]:
-			edges = cv2.Canny(enhanced, low_t, high_t)
+			edges = cv2.Canny(enhanced, 40, 120)
 			dilated = cv2.dilate(edges, kernel, iterations=2)
 			self._extract_contour_candidates(dilated, max_area, all_candidates)
+		else:
+			# Accuracy mode: run adaptive thresholding at multiple block sizes to
+			# catch both fine-grained and coarser patterns (important for blurry images)
+			block_sizes = [self._adaptive_block_size]
+			for alt in [15, 51, 71]:
+				if alt != self._adaptive_block_size:
+					block_sizes.append(alt)
 
-		# --- Path 3: Otsu on unsharp-masked image (handles uniform blur) ---
-		unsharp = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
-		_, otsu_binary = cv2.threshold(unsharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-		otsu_binary = cv2.bitwise_not(otsu_binary)
-		morphed_otsu = cv2.morphologyEx(otsu_binary, cv2.MORPH_CLOSE, kernel, iterations=1)
-		self._extract_contour_candidates(morphed_otsu, max_area, all_candidates)
+			# --- Path 1: adaptive threshold (works well on sharp images) ---
+			for block_size in block_sizes:
+				binary = cv2.adaptiveThreshold(
+					enhanced,
+					255,
+					cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+					cv2.THRESH_BINARY,
+					block_size,
+					self._adaptive_c,
+				)
+				binary = cv2.bitwise_not(binary)
+				morphed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+				self._extract_contour_candidates(morphed, max_area, all_candidates)
+
+			# --- Path 2: Canny edge detection (better for blurry/distant images) ---
+			for low_t, high_t in [(30, 100), (50, 150)]:
+				edges = cv2.Canny(enhanced, low_t, high_t)
+				dilated = cv2.dilate(edges, kernel, iterations=2)
+				self._extract_contour_candidates(dilated, max_area, all_candidates)
+
+			# --- Path 3: Otsu on unsharp-masked image (handles uniform blur) ---
+			unsharp = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+			_, otsu_binary = cv2.threshold(unsharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+			otsu_binary = cv2.bitwise_not(otsu_binary)
+			morphed_otsu = cv2.morphologyEx(otsu_binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+			self._extract_contour_candidates(morphed_otsu, max_area, all_candidates)
 
 		all_candidates.sort(key=lambda item: (item[2] - item[0]) * (item[3] - item[1]), reverse=True)
 		unique: list[tuple[int, int, int, int]] = []
@@ -450,22 +819,19 @@ class OpenCVDataMatrixDetector:
 		detector_cfg = config.get("opencv_datamatrix", {})
 
 		if fast:
-			# Build a fast scanner for live preview — balanced between speed and accuracy.
-			dec_cfg = config.get("decoding", {})
-			dmtx_cfg = dec_cfg.get("pylibdmtx", {})
-			# Use config timeout or a generous default; 100ms was too tight on Pi.
-			fast_timeout = dmtx_cfg.get("fast_timeout_ms", dmtx_cfg.get("timeout_ms", 2000))
-			pylibdmtx = PylibdmtxScanner(
-				timeout_ms=fast_timeout,
-				max_count=dmtx_cfg.get("max_count"),
-				shrink=max(dmtx_cfg.get("shrink", 1), 1),
-				threshold=dmtx_cfg.get("threshold", 50),
-				min_edge=dmtx_cfg.get("min_edge", 8),
-				max_edge=dmtx_cfg.get("max_edge", 200),
-			)
-			zxing = ZxingScanner(try_harder=False)  # speed priority in live mode
-			# merge_results=False: only run zxing if pylibdmtx found nothing
-			scanner = CompositeScanner(primary=pylibdmtx, fallback=zxing, merge_results=False)
+			# Build a fast scanner for live preview — zxing-only, no pylibdmtx.
+			#
+			# pylibdmtx has a hard minimum of ~200ms per scan call (timeout floor).
+			# 35 candidates × 3 variants × 200ms = up to 21 seconds worst-case.
+			# zxing-cpp has no timeout and completes each ROI in 2-30ms, so worst
+			# case is 35 × 3 × 30ms = ~3 seconds, typical < 1 second.
+			#
+			# try_harder=True runs 3 binarizers (LocalAverage / GlobalHistogram /
+			# FixedThreshold) — still << 100ms per ROI, but much higher recognition
+			# rate than a single binarizer pass.
+			zxing = ZxingScanner(try_harder=True)
+			# No fallback needed: zxing already tries multiple binarizers.
+			scanner = CompositeScanner(primary=zxing, fallback=None, merge_results=False)
 			return OpenCVDataMatrixDetector(
 				scanner=scanner,
 				min_area=detector_cfg.get("min_area", 60),
@@ -477,12 +843,27 @@ class OpenCVDataMatrixDetector:
 				aspect_ratio_min=detector_cfg.get("aspect_ratio_min", 0.5),
 				aspect_ratio_max=detector_cfg.get("aspect_ratio_max", 2.0),
 				padding=detector_cfg.get("padding", 20),
-				max_candidates=detector_cfg.get("max_candidates", 120),
+				# Fast mode: cap at 35 candidates — 150 candidates × variants is the
+				# main cause of 50+ second latency.  35 well-ranked candidates
+				# (sorted by area descending) covers almost all real DataMatrix codes.
+				max_candidates=detector_cfg.get("fast_max_candidates", 35),
 				clahe_clip_limit=detector_cfg.get("clahe_clip_limit", 3.0),
 				fallback_full_image=True,
-				max_roi_scan_variants=5,        # original + enhanced + unsharp + inverted + bilateral
-				max_full_frame_scan_variants=6,  # original + enhanced + unsharp + bilateral + inverted + binary
-			)
+				# 3 variants: original + enhanced + unsharp.  More than enough for
+				# live preview; aggressive variants (denoising, morphological) are
+				# reserved for batch mode where latency is less critical.
+				max_roi_scan_variants=3,
+				max_full_frame_scan_variants=4,
+				# Speed mode: full-frame only when ROI found nothing
+				full_frame_always_supplement=False,
+			# Fast candidate detection: 1 adaptive-threshold + 1 Canny pass
+			fast_candidate_detection=True,
+			# Flat task pool: 2×cpu_count workers keeps the pool full even when
+			# a thread briefly holds the GIL for OpenCV preprocessing.
+			# Pi 5 (4 cores) → 8 workers: ceil(35 cand × 3 variants / 8) = 14
+			# rounds × ~15ms ≈ 210ms vs old ceil(35/4) × 3 × 15ms ≈ 405ms.
+			parallel_workers=min(8, (os.cpu_count() or 4) * 2),
+		)
 
 		# Full-quality scanner for batch/capture mode
 		dec_cfg = config.get("decoding", {})
@@ -509,9 +890,11 @@ class OpenCVDataMatrixDetector:
 			aspect_ratio_min=detector_cfg.get("aspect_ratio_min", 0.5),
 			aspect_ratio_max=detector_cfg.get("aspect_ratio_max", 2.0),
 			padding=detector_cfg.get("padding", 20),
-			max_candidates=detector_cfg.get("max_candidates", 120),
+			max_candidates=detector_cfg.get("max_candidates", 100),
 			clahe_clip_limit=detector_cfg.get("clahe_clip_limit", 3.0),
 			fallback_full_image=detector_cfg.get("fallback_full_image", True),
-			max_roi_scan_variants=6,          # try all preprocessing variants
-			max_full_frame_scan_variants=6,   # try all full-frame fallback variants
+			max_roi_scan_variants=7,           # original+enhanced+unsharp+invert+bilateral+morphological+jpeg_artifact
+			max_full_frame_scan_variants=8,    # same set for full-frame
+			# Accuracy mode: full-frame supplements ROI to catch any missed codes
+			full_frame_always_supplement=True,
 		)

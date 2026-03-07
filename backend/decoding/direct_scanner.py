@@ -53,6 +53,17 @@ class PylibdmtxScanner:
 
         start = time.perf_counter()
 
+        # Adaptive timeout: small images don't need the full timeout budget.
+        # A 200×200 ROI has 40 000 pixels; pylibdmtx rarely needs more than
+        # 300ms on it.  Scale linearly capped at the configured maximum.
+        # Reference area: 640×640 = 409 600 pixels.
+        pixel_count = image.shape[0] * image.shape[1]
+        ref_area = 640 * 640
+        adaptive_timeout = max(
+            200,  # floor: 200ms minimum for any ROI
+            min(self._timeout_ms, int(self._timeout_ms * (pixel_count / ref_area))),
+        )
+
         # Convert to PIL Image
         if len(image.shape) == 3:
             rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -62,7 +73,7 @@ class PylibdmtxScanner:
 
         # Build decode kwargs
         kwargs = {
-            "timeout": self._timeout_ms,
+            "timeout": adaptive_timeout,
             "shrink": self._shrink,
             "threshold": self._threshold,
             "min_edge": self._min_edge,
@@ -108,7 +119,10 @@ class PylibdmtxScanner:
                     success=True,
                 ))
 
-            logger.info("pylibdmtx found %d codes in %.1fms", len(results), elapsed)
+            logger.debug(
+                "pylibdmtx found %d codes in %.1fms (timeout=%dms, pixels=%d)",
+                len(results), elapsed, adaptive_timeout, pixel_count,
+            )
             return results
 
         except Exception as e:

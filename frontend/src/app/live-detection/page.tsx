@@ -10,24 +10,38 @@ import { DetectionCanvas } from "@/components/detection/detection-canvas";
 import { ObjectResultTable } from "@/components/detection/object-result-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { captureLiveDetection, fetchCameras, fetchLiveCameraDetection, previewDetection, runDetection } from "@/lib/api/client";
 import { resolveApiAssetUrl } from "@/lib/api/config";
 import type { CameraInfo, DetectionObject, ImageSize } from "@/types";
 
 type PerformanceMode = "auto" | "low" | "balanced" | "high";
 
-const PERFORMANCE_PROFILES: Record<PerformanceMode, {
-  previewIntervalMs: number;
-  detectIntervalMs: number;
-  previewWidth: number;
-  detectWidth: number;
+/** Only concrete profiles — "auto" resolves at runtime to "low" or "balanced" based on hardware / network. */
+const PERFORMANCE_PROFILES: Record<Exclude<PerformanceMode, "auto">, {
+  /**
+   * Minimum total cycle time (ms). Next detection starts as soon as
+   * max(minCycleMs - detectionTime, 50) has elapsed — so detectIntervalMs
+   * is the TOTAL period, not an extra delay added after detection completes.
+   */
+  minCycleMs: number;
+  /** Scale factor applied to the camera resolution for the MJPEG preview stream. */
+  previewScale: number;
+  /** Scale factor applied to the camera resolution for each detection request. */
+  detectScale: number;
+  /** JPEG quality sent to the backend (0–1). */
   jpegQuality: number;
 }> = {
-  // Preview uses full-res JPEG (up to 1920); detection uses smaller crop for speed.
-  auto:     { previewIntervalMs: 600,  detectIntervalMs: 1800, previewWidth: 1280, detectWidth: 640, jpegQuality: 0.80 },
-  low:      { previewIntervalMs: 1200, detectIntervalMs: 2600, previewWidth: 640,  detectWidth: 480, jpegQuality: 0.60 },
-  balanced: { previewIntervalMs: 600,  detectIntervalMs: 1800, previewWidth: 1280, detectWidth: 1080, jpegQuality: 0.80 },
-  high:     { previewIntervalMs: 300,  detectIntervalMs: 1400, previewWidth: 1920, detectWidth: 1080, jpegQuality: 0.88 },
+  //                  total cycle  preview res  detect res   JPEG Q
+  low:      { minCycleMs: 2000, previewScale: 0.45, detectScale: 0.35, jpegQuality: 0.60 },
+  balanced: { minCycleMs: 800,  previewScale: 0.65, detectScale: 0.55, jpegQuality: 0.75 },
+  high:     { minCycleMs: 400,  previewScale: 0.85, detectScale: 0.72, jpegQuality: 0.85 },
+};
+
+const PERFORMANCE_MODE_LABELS: Record<Exclude<PerformanceMode, "auto">, string> = {
+  low:      "低耗能",
+  balanced: "平衡",
+  high:     "高效能",
 };
 
 interface SurfaceSize {
@@ -40,6 +54,14 @@ type LiveCameraOption = CameraInfo & {
   deviceId?: string;
 };
 
+function scaleDimension(value: number, scale: number, minimum = 320) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return minimum;
+  }
+
+  return Math.min(value, Math.max(minimum, Math.round(value * scale)));
+}
+
 export default function LiveDetectionPage() {
   const [cameras, setCameras] = useState<LiveCameraOption[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<string>("");
@@ -50,6 +72,8 @@ export default function LiveDetectionPage() {
   const [isLoadingCameras, setIsLoadingCameras] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [isScanningLive, setIsScanningLive] = useState(false);
+  const [lastScanInfo, setLastScanInfo] = useState<{ count: number; elapsedMs: number; at: Date } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [performanceMode, setPerformanceMode] = useState<PerformanceMode>("auto");
   const [browserStream, setBrowserStream] = useState<MediaStream | null>(null);
@@ -66,11 +90,12 @@ export default function LiveDetectionPage() {
     [cameras, selectedCameraId],
   );
 
-  const performanceProfile = useMemo(() => {
-    if (performanceMode !== "auto") {
-      return PERFORMANCE_PROFILES[performanceMode];
-    }
-
+  /**
+   * When mode is "auto", resolve once on mount to "low" or "balanced" based on
+   * hardware concurrency and network conditions.  Hardware doesn't change at
+   * runtime so there's no need to recompute.
+   */
+  const autoResolvedMode = useMemo<Exclude<PerformanceMode, "auto">>(() => {
     const connection = typeof navigator !== "undefined"
       ? (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection
       : undefined;
@@ -81,8 +106,52 @@ export default function LiveDetectionPage() {
       || connection?.effectiveType === "2g"
       || connection?.effectiveType === "slow-2g";
 
-    return isLowEnd ? PERFORMANCE_PROFILES.low : PERFORMANCE_PROFILES.balanced;
-  }, [performanceMode]);
+    return isLowEnd ? "low" : "balanced";
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally computed once
+
+  const resolvedMode = performanceMode === "auto" ? autoResolvedMode : performanceMode;
+
+  const performanceProfile = useMemo(
+    () => PERFORMANCE_PROFILES[resolvedMode],
+    [resolvedMode],
+  );
+
+  const selectedCameraSurface = useMemo(() => {
+    if (selectedCamera?.sourceScope === "backend" && overlaySourceSize?.width && overlaySourceSize.height) {
+      return overlaySourceSize;
+    }
+
+    if (selectedCamera?.sourceScope === "browser" && videoNativeSize.width > 0 && videoNativeSize.height > 0) {
+      return videoNativeSize;
+    }
+
+    if (selectedCamera?.width && selectedCamera.height) {
+      return {
+        width: selectedCamera.width,
+        height: selectedCamera.height,
+      };
+    }
+
+    return null;
+  }, [overlaySourceSize, selectedCamera, videoNativeSize]);
+
+  const performanceTargetSize = useMemo(() => {
+    if (!selectedCameraSurface) {
+      return null;
+    }
+
+    return {
+      preview: {
+        width: scaleDimension(selectedCameraSurface.width, performanceProfile.previewScale),
+        height: scaleDimension(selectedCameraSurface.height, performanceProfile.previewScale, 180),
+      },
+      detect: {
+        width: scaleDimension(selectedCameraSurface.width, performanceProfile.detectScale),
+        height: scaleDimension(selectedCameraSurface.height, performanceProfile.detectScale, 180),
+      },
+    };
+  }, [performanceProfile.detectScale, performanceProfile.previewScale, selectedCameraSurface]);
 
   useEffect(() => {
     void refreshCameras();
@@ -163,20 +232,33 @@ export default function LiveDetectionPage() {
 
     const loop = async () => {
       while (!cancelled) {
+        const cycleStart = Date.now();
         try {
+          if (!cancelled) setIsScanningLive(true);
           if (selectedCamera.sourceScope === "backend") {
-            const response = await fetchLiveCameraDetection(selectedCameraId, "opencv", performanceProfile.detectWidth);
+            const response = await fetchLiveCameraDetection(
+              selectedCameraId,
+              "opencv",
+              performanceTargetSize?.detect.width ?? scaleDimension(selectedCamera?.width ?? 0, performanceProfile.detectScale),
+            );
             if (!cancelled) {
+              const elapsedMs = Date.now() - cycleStart;
+              syncCameraActualResolution(selectedCameraId, response.sourceImage);
               setObjects(response.objects);
               setOverlaySourceSize(response.sourceImage ?? null);
               setSelectedBid((current) => current ?? response.objects[0]?.bid ?? null);
+              setLastScanInfo({ count: response.objects.length, elapsedMs, at: new Date() });
+              setError(null);
             }
           } else {
             const response = await previewFromBrowserCamera();
             if (!cancelled) {
+              const elapsedMs = Date.now() - cycleStart;
               setObjects(response.objects);
               setOverlaySourceSize(response.sourceImage ?? null);
               setSelectedBid((current) => current ?? response.objects[0]?.bid ?? null);
+              setLastScanInfo({ count: response.objects.length, elapsedMs, at: new Date() });
+              setError(null);
             }
           }
         } catch (err) {
@@ -184,9 +266,15 @@ export default function LiveDetectionPage() {
             const message = err instanceof Error ? err.message : "即時辨識失敗";
             setError(message);
           }
+        } finally {
+          if (!cancelled) setIsScanningLive(false);
         }
-        // Wait before next tick — adapts naturally to backend speed
-        await new Promise((r) => setTimeout(r, cancelled ? 0 : performanceProfile.detectIntervalMs));
+        // Wait only the remaining time so that minCycleMs is the TOTAL period,
+        // not an extra delay added after detection. Minimum 50ms to yield the
+        // event loop even when detection is faster than the cycle target.
+        const elapsed = Date.now() - cycleStart;
+        const remaining = Math.max(50, performanceProfile.minCycleMs - elapsed);
+        await new Promise((r) => setTimeout(r, cancelled ? 0 : remaining));
       }
     };
 
@@ -194,8 +282,9 @@ export default function LiveDetectionPage() {
 
     return () => {
       cancelled = true;
+      setIsScanningLive(false);
     };
-  }, [isPreviewing, performanceProfile.detectIntervalMs, performanceProfile.detectWidth, selectedCamera, selectedCameraId]);
+  }, [isPreviewing, performanceProfile.minCycleMs, performanceProfile.detectScale, performanceTargetSize, selectedCamera, selectedCameraId]);
 
   // MJPEG stream URL for backend cameras — browser handles frame updates natively.
   // Detection runs concurrently by reading the server-side frame cache.
@@ -203,10 +292,46 @@ export default function LiveDetectionPage() {
     if (!isPreviewing || !selectedCameraId || selectedCamera?.sourceScope !== "backend") {
       return null;
     }
-    return `/api/cameras/${selectedCameraId}/stream?maxWidth=${performanceProfile.previewWidth}&quality=${Math.round(performanceProfile.jpegQuality * 100)}`;
-  }, [isPreviewing, selectedCameraId, selectedCamera?.sourceScope, performanceProfile.previewWidth, performanceProfile.jpegQuality]);
+    const previewWidth = performanceTargetSize?.preview.width
+      ?? scaleDimension(selectedCamera?.width ?? 0, performanceProfile.previewScale);
+
+    return `/api/cameras/${selectedCameraId}/stream?maxWidth=${previewWidth}&quality=${Math.round(performanceProfile.jpegQuality * 100)}`;
+  }, [isPreviewing, performanceProfile.jpegQuality, performanceProfile.previewScale, performanceTargetSize, selectedCamera?.sourceScope, selectedCamera?.width, selectedCameraId]);
 
   const selectedObject = objects.find((item) => item.bid === selectedBid) ?? null;
+
+  function handleCameraChange(cameraId: string) {
+    setSelectedCameraId(cameraId);
+    setIsPreviewing(false);
+    setObjects([]);
+    setSelectedBid(null);
+    setRid(null);
+    setOverlaySourceSize(null);
+    clearBrowserPreviewUrl();
+    setPreviewUrl(null);
+  }
+
+  function syncCameraActualResolution(cameraId: string, sourceImage?: ImageSize | null) {
+    if (!sourceImage?.width || !sourceImage.height) {
+      return;
+    }
+
+    setCameras((current) => current.map((camera) => {
+      if (camera.id !== cameraId) {
+        return camera;
+      }
+
+      if (camera.width === sourceImage.width && camera.height === sourceImage.height) {
+        return camera;
+      }
+
+      return {
+        ...camera,
+        width: sourceImage.width,
+        height: sourceImage.height,
+      };
+    }));
+  }
 
   function clearBrowserPreviewUrl() {
     if (browserPreviewUrlRef.current) {
@@ -294,6 +419,8 @@ export default function LiveDetectionPage() {
 
   function stopPreview() {
     setIsPreviewing(false);
+    setIsScanningLive(false);
+    setLastScanInfo(null);
     stopBrowserStream();
     setOverlaySourceSize(null);
   }
@@ -313,6 +440,9 @@ export default function LiveDetectionPage() {
 
       setIsPreviewing(false);
       stopBrowserStream();
+      if (selectedCamera.sourceScope === "backend") {
+        syncCameraActualResolution(selectedCameraId, response.sourceImage);
+      }
       setRid(response.rid);
       setObjects(response.objects);
       setOverlaySourceSize(response.sourceImage ?? null);
@@ -344,14 +474,29 @@ export default function LiveDetectionPage() {
         audio: false,
       });
 
+      const [videoTrack] = stream.getVideoTracks();
+      const settings = videoTrack?.getSettings();
+      const streamWidth = typeof settings?.width === "number" ? settings.width : camera.width;
+      const streamHeight = typeof settings?.height === "number" ? settings.height : camera.height;
+
       browserStreamRef.current = stream;
       setBrowserStream(stream);
+      setVideoNativeSize({ width: streamWidth || 0, height: streamHeight || 0 });
       setError(null);
 
       const refreshedBrowser = await getBrowserCameras();
       setCameras((current) => {
         const backend = current.filter((item) => item.sourceScope === "backend");
-        return [...refreshedBrowser, ...backend];
+        return [
+          ...refreshedBrowser.map((item) => item.id === camera.id
+            ? {
+                ...item,
+                width: streamWidth || item.width,
+                height: streamHeight || item.height,
+              }
+            : item),
+          ...backend,
+        ];
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "無法開啟裝置鏡頭";
@@ -414,7 +559,7 @@ export default function LiveDetectionPage() {
     const height = video.videoHeight || 720;
 
     const canvas = document.createElement("canvas");
-    const targetWidth = Math.min(width, performanceProfile.detectWidth);
+    const targetWidth = scaleDimension(width, performanceProfile.detectScale);
     const targetHeight = Math.max(1, Math.round((height / width) * targetWidth));
     canvas.width = targetWidth;
     canvas.height = targetHeight;
@@ -494,27 +639,18 @@ export default function LiveDetectionPage() {
             <div className="space-y-4 text-sm">
               <div className="space-y-2">
                 <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">目前鏡頭</label>
-                <select
-                  className="flex h-10 w-full rounded-md border border-input bg-input/20 px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
-                  value={selectedCameraId}
-                  onChange={(event) => {
-                    setSelectedCameraId(event.target.value);
-                    setIsPreviewing(false);
-                    setObjects([]);
-                    setSelectedBid(null);
-                    setRid(null);
-                    setOverlaySourceSize(null);
-                    clearBrowserPreviewUrl();
-                    setPreviewUrl(null);
-                  }}
-                >
-                  {!cameras.length ? <option value="">目前沒有鏡頭</option> : null}
-                  {cameras.map((camera) => (
-                    <option key={camera.id} value={camera.id} disabled={!camera.available}>
-                      [{camera.sourceScope === "browser" ? "裝置" : "主機"}] {camera.label} {camera.available ? "" : "（不可用）"}
-                    </option>
-                  ))}
-                </select>
+                <Select value={selectedCameraId || undefined} onValueChange={handleCameraChange} disabled={!cameras.length}>
+                  <SelectTrigger className="h-10 w-full px-3 text-sm">
+                    <SelectValue placeholder="目前沒有鏡頭" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {cameras.map((camera) => (
+                      <SelectItem key={camera.id} value={camera.id} disabled={!camera.available}>
+                        [{camera.sourceScope === "browser" ? "裝置" : "主機"}] {camera.label} {camera.available ? "" : "（不可用）"}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <p className="text-xs text-muted-foreground">
                   {isLoadingCameras
                     ? "正在掃描鏡頭..."
@@ -531,16 +667,22 @@ export default function LiveDetectionPage() {
 
               <div className="space-y-2">
                 <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">效能模式</label>
-                <select
-                  className="flex h-10 w-full rounded-md border border-input bg-input/20 px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
-                  value={performanceMode}
-                  onChange={(event) => setPerformanceMode(event.target.value as PerformanceMode)}
-                >
-                  <option value="auto">自動</option>
-                  <option value="low">低耗能 / 弱網路</option>
-                  <option value="balanced">平衡</option>
-                  <option value="high">高更新率</option>
-                </select>
+                <Select value={performanceMode} onValueChange={(value) => setPerformanceMode(value as PerformanceMode)}>
+                  <SelectTrigger className="h-10 w-full px-3 text-sm">
+                    <SelectValue placeholder="選擇效能模式" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">自動（依裝置與網路偵測）</SelectItem>
+                    <SelectItem value="low">低耗能 — 省頻寬 / 弱網路</SelectItem>
+                    <SelectItem value="balanced">平衡 — 適合大多數場景</SelectItem>
+                    <SelectItem value="high">高效能 — 快速偵測 / 高解析</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {performanceMode === "auto"
+                    ? `自動已解析為「${PERFORMANCE_MODE_LABELS[autoResolvedMode]}」模式`
+                    : `最小周期 ${(performanceProfile.minCycleMs / 1000).toFixed(1)} 秒 / 品質 ${Math.round(performanceProfile.jpegQuality * 100)}%`}
+                </p>
               </div>
 
               {selectedCamera ? (
@@ -554,19 +696,62 @@ export default function LiveDetectionPage() {
                   <p className="text-muted-foreground">範圍：{selectedCamera.sourceScope === "browser" ? "目前設備鏡頭" : "後端主機鏡頭"}</p>
                   <p className="text-muted-foreground">來源：{selectedCamera.sourceType} / index {selectedCamera.cameraNum}</p>
                   <p className="text-muted-foreground">解析度：{selectedCamera.width} × {selectedCamera.height}</p>
-                  <p className="text-muted-foreground">模式：{performanceMode === "auto" ? "自動" : performanceMode} / 預覽 {performanceProfile.previewWidth}px / 辨識 {performanceProfile.detectWidth}px</p>
+                  <p className="text-muted-foreground">
+                    模式：
+                    {performanceMode === "auto"
+                      ? `自動 → ${PERFORMANCE_MODE_LABELS[autoResolvedMode]}`
+                      : PERFORMANCE_MODE_LABELS[resolvedMode]}
+                  </p>
+                  <p className="text-muted-foreground">
+                    最小周期：{(performanceProfile.minCycleMs / 1000).toFixed(1)} 秒（偵測完成即進行下一張）
+                  </p>
+                  <p className="text-muted-foreground">
+                    {performanceTargetSize
+                      ? `預覽 ${performanceTargetSize.preview.width}×${performanceTargetSize.preview.height}（${Math.round(performanceProfile.previewScale * 100)}%）／辨識 ${performanceTargetSize.detect.width}×${performanceTargetSize.detect.height}（${Math.round(performanceProfile.detectScale * 100)}%）`
+                      : `預覽 ${Math.round(performanceProfile.previewScale * 100)}%／辨識 ${Math.round(performanceProfile.detectScale * 100)}%`}
+                  </p>
                   {selectedCamera.status ? <p className="wrap-break-word text-xs text-muted-foreground">狀態：{selectedCamera.status}</p> : null}
                 </div>
               ) : null}
 
-              <div className="rounded-2xl border bg-muted/20 p-4">
-                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">本次擷取摘要</p>
-                <div className="space-y-2">
-                  <p className="text-sm text-muted-foreground">RID：<span className="font-medium text-foreground">{rid ?? "尚未擷取"}</span></p>
-                  <p className="text-sm text-muted-foreground">物件數量：<span className="font-medium text-foreground">{objects.length}</span></p>
-                  <p className="text-sm text-muted-foreground">目前選取：<span className="font-medium break-all text-foreground">{selectedObject?.bid ?? "無"}</span></p>
+              {isPreviewing ? (
+                <div className="rounded-2xl border bg-muted/20 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">即時掃描狀態</p>
+                    {isScanningLive ? (
+                      <span className="flex items-center gap-1.5 text-xs font-medium text-sky-500">
+                        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-sky-500" />
+                        掃描中…
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
+                        待命
+                      </span>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    {lastScanInfo ? (
+                      <>
+                        <p className="text-sm text-muted-foreground">最後掃描結果：<span className="font-medium text-foreground">{lastScanInfo.count} 個物件</span></p>
+                        <p className="text-sm text-muted-foreground">耕耗時間：<span className="font-medium text-foreground">{lastScanInfo.elapsedMs} ms</span></p>
+                        <p className="text-sm text-muted-foreground">時刻：<span className="font-medium text-foreground">{lastScanInfo.at.toLocaleTimeString()}</span></p>
+                      </>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">等待第一次掃描…</p>
+                    )}
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="rounded-2xl border bg-muted/20 p-4">
+                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">本次擷取框要</p>
+                  <div className="space-y-2">
+                    <p className="text-sm text-muted-foreground">RID：<span className="font-medium text-foreground">{rid ?? "尚未擷取"}</span></p>
+                    <p className="text-sm text-muted-foreground">物件數量：<span className="font-medium text-foreground">{objects.length}</span></p>
+                    <p className="text-sm text-muted-foreground">目前選取：<span className="font-medium break-all text-foreground">{selectedObject?.bid ?? "無"}</span></p>
+                  </div>
+                </div>
+              )}
 
               {error ? (
                 <div className="flex items-start gap-2 rounded-2xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
@@ -582,6 +767,17 @@ export default function LiveDetectionPage() {
           <SectionCard title="鏡頭畫面" description="裝置鏡頭會直接顯示瀏覽器預覽；後端鏡頭則透過 API 取回最新影格。擷取後會顯示已存檔的辨識結果影像。">
             {isPreviewing && selectedCamera?.sourceScope === "browser" ? (
               <div className="relative overflow-hidden rounded-3xl border bg-card/70 p-3 shadow-sm">
+                {isScanningLive ? (
+                  <div className="absolute right-5 top-5 z-30 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" />
+                    掃描中
+                  </div>
+                ) : lastScanInfo ? (
+                  <div className="absolute right-5 top-5 z-30 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                    {lastScanInfo.count > 0 ? `找到 ${lastScanInfo.count} 個` : "未偵測到"} · {lastScanInfo.elapsedMs}ms
+                  </div>
+                ) : null}
                 <div ref={videoContainerRef} className="relative h-[min(62vh,40rem)] min-h-80 overflow-hidden rounded-2xl bg-[linear-gradient(135deg,#f8fafc,#dbeafe)] dark:bg-[linear-gradient(135deg,#0f172a,#1e293b)]">
                   <video
                     ref={videoRef}
@@ -628,13 +824,28 @@ export default function LiveDetectionPage() {
                 </div>
               </div>
             ) : (
-              <DetectionCanvas
-                imageUrl={isPreviewing && selectedCamera?.sourceScope === "backend" ? streamUrl : previewUrl}
-                objects={objects}
-                selectedBid={selectedBid}
-                onSelect={setSelectedBid}
-                sourceImageSize={overlaySourceSize}
-              />
+              <div className="relative">
+                {isPreviewing && selectedCamera?.sourceScope === "backend" && (
+                  isScanningLive ? (
+                    <div className="absolute right-5 top-5 z-30 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm">
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" />
+                      掃描中
+                    </div>
+                  ) : lastScanInfo ? (
+                    <div className="absolute right-5 top-5 z-30 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm">
+                      <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                      {lastScanInfo.count > 0 ? `找到 ${lastScanInfo.count} 個` : "未偵測到"} · {lastScanInfo.elapsedMs}ms
+                    </div>
+                  ) : null
+                )}
+                <DetectionCanvas
+                  imageUrl={isPreviewing && selectedCamera?.sourceScope === "backend" ? streamUrl : previewUrl}
+                  objects={objects}
+                  selectedBid={selectedBid}
+                  onSelect={setSelectedBid}
+                  sourceImageSize={overlaySourceSize}
+                />
+              </div>
             )}
           </SectionCard>
 
