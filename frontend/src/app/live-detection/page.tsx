@@ -232,10 +232,19 @@ export default function LiveDetectionPage() {
     setIsLoadingCameras(true);
     setError(null);
     try {
-      // Run both fetches independently so a browser-camera failure
-      // (e.g. HTTP non-secure context on Pi) never blocks backend cameras.
+      // Wrap fetchCameras with a 10-second timeout so a slow/unreachable backend
+      // never causes Promise.allSettled to hang and keep isLoadingCameras=true forever.
+      function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+        return Promise.race([
+          promise,
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`${label} 逾時（${ms / 1000} 秒）`)), ms),
+          ),
+        ]);
+      }
+
       const [backendResult, browserResult] = await Promise.allSettled([
-        fetchCameras(),
+        withTimeout(fetchCameras(), 10_000, "後端鏡頭掃描"),
         getBrowserCameras(),
       ]);
 
