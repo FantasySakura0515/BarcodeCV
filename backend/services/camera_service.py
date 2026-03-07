@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -12,6 +13,18 @@ from ..camera.picamera_source import PiCameraSource
 from .detection_service import DetectionPreviewResult, DetectionRunResult, DetectionService
 
 logger = logging.getLogger("barcodecv.camera")
+
+# Global per-camera locks — keyed by camera_id.
+# Prevents two concurrent requests from calling open() on the same physical camera.
+_CAMERA_LOCKS: dict[str, threading.Lock] = {}
+_CAMERA_LOCKS_MU = threading.Lock()
+
+
+def _get_camera_lock(camera_id: str) -> threading.Lock:
+    with _CAMERA_LOCKS_MU:
+        if camera_id not in _CAMERA_LOCKS:
+            _CAMERA_LOCKS[camera_id] = threading.Lock()
+        return _CAMERA_LOCKS[camera_id]
 
 
 @dataclass
@@ -64,8 +77,9 @@ class CameraService:
         return cameras
 
     def capture_preview(self, camera_id: str, max_width: int | None = None, quality: int = 70) -> bytes:
-        with self._create_camera_source(camera_id) as camera:
-            frame = camera.capture_frame()
+        with _get_camera_lock(camera_id):
+            with self._create_camera_source(camera_id) as camera:
+                frame = camera.capture_frame()
 
         image = self._resize_to_max_width(frame.image, max_width)
 
@@ -75,8 +89,9 @@ class CameraService:
         return encoded.tobytes()
 
     def capture_and_detect(self, camera_id: str, model_type: str = "opencv") -> DetectionRunResult:
-        with self._create_camera_source(camera_id) as camera:
-            frame = camera.capture_frame()
+        with _get_camera_lock(camera_id):
+            with self._create_camera_source(camera_id) as camera:
+                frame = camera.capture_frame()
 
         return self._detection_service.run_detection_on_image(
             image=frame.image,
@@ -92,8 +107,9 @@ class CameraService:
         model_type: str = "opencv",
         max_width: int | None = None,
     ) -> DetectionPreviewResult:
-        with self._create_camera_source(camera_id) as camera:
-            frame = camera.capture_frame()
+        with _get_camera_lock(camera_id):
+            with self._create_camera_source(camera_id) as camera:
+                frame = camera.capture_frame()
 
         image = self._resize_to_max_width(frame.image, max_width)
 

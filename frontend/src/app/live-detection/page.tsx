@@ -704,7 +704,13 @@ async function getBrowserCameras(): Promise<LiveCameraOption[]> {
   }
 
   try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
+    // enumerateDevices() can hang on some browsers/platforms (e.g. Pi Chromium
+    // waiting for a permission dialog). Apply a 5-second timeout.
+    const devicesPromise = navigator.mediaDevices.enumerateDevices();
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("enumerateDevices timeout")), 5_000),
+    );
+    const devices = await Promise.race([devicesPromise, timeoutPromise]);
     const videoInputs = devices.filter((device) => device.kind === "videoinput");
 
     return videoInputs.map((device, index) => ({
