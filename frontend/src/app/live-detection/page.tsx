@@ -46,11 +46,12 @@ export default function LiveDetectionPage() {
   const [rid, setRid] = useState<string | null>(null);
   const [objects, setObjects] = useState<DetectionObject[]>([]);
   const [selectedBid, setSelectedBid] = useState<string | null>(null);
-  const [isLoadingCameras, setIsLoadingCameras] = useState(true);
+  const [isLoadingCameras, setIsLoadingCameras] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [debugInfo, setDebugInfo] = useState<string | null>(null);
+  const [fetchStep, setFetchStep] = useState<string>("尚未開始");
   const [performanceMode, setPerformanceMode] = useState<PerformanceMode>("auto");
   const [browserStream, setBrowserStream] = useState<MediaStream | null>(null);
   const [overlaySourceSize, setOverlaySourceSize] = useState<ImageSize | null>(null);
@@ -233,27 +234,29 @@ export default function LiveDetectionPage() {
     setIsLoadingCameras(true);
     setError(null);
     setDebugInfo(null);
+    setFetchStep("1. setIsLoadingCameras(true) 完成");
     try {
+      setFetchStep("2. 呼叫 Promise.allSettled...");
       const [backendResult, browserResult] = await Promise.allSettled([
         fetchCameras(),
         getBrowserCameras(),
       ]);
+      setFetchStep("3. Promise.allSettled 已 resolve");
 
       const rawBackend = backendResult.status === "fulfilled" ? backendResult.value : undefined;
       const rawBrowser = browserResult.status === "fulfilled" ? browserResult.value : undefined;
       const backendItems: CameraInfo[] = Array.isArray(rawBackend) ? (rawBackend as CameraInfo[]) : [];
       const browserItems: LiveCameraOption[] = Array.isArray(rawBrowser) ? rawBrowser : [];
 
-      // Build on-page debug summary (always visible without DevTools)
       const dbg = [
         `backend: ${backendResult.status}`,
         backendResult.status === "fulfilled"
-          ? `value type=${Array.isArray(rawBackend) ? "array" : typeof rawBackend}, len=${backendItems.length}, raw=${JSON.stringify(rawBackend)?.slice(0, 200)}`
+          ? `type=${Array.isArray(rawBackend) ? "array" : typeof rawBackend}, len=${backendItems.length}, raw=${JSON.stringify(rawBackend)?.slice(0, 300)}`
           : `reason=${String(backendResult.reason)}`,
         `browser: ${browserResult.status}, len=${browserItems.length}`,
       ].join(" | ");
       setDebugInfo(dbg);
-      console.debug("[refreshCameras]", dbg);
+      setFetchStep(`4. debugInfo set. backendItems.length=${backendItems.length}`);
 
       if (backendResult.status === "rejected") {
         const msg = backendResult.reason instanceof Error ? backendResult.reason.message : "無法連線到後端";
@@ -270,6 +273,7 @@ export default function LiveDetectionPage() {
         })),
       ];
 
+      setFetchStep(`5. setCameras(${items.length} items)`);
       setCameras(items);
 
       const preferred = items.find((item) => item.id === selectedCameraId && item.available)
@@ -278,12 +282,15 @@ export default function LiveDetectionPage() {
         ?? null;
 
       setSelectedCameraId(preferred?.id ?? "");
+      setFetchStep(`6. 完成。selectedId=${preferred?.id ?? "(none)"}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : "無法取得鏡頭清單";
       setDebugInfo(`catch: ${String(err)}`);
+      setFetchStep(`ERR: ${String(err)}`);
       setError(message);
     } finally {
       setIsLoadingCameras(false);
+      setFetchStep((prev) => prev + " → finally done");
     }
   }
 
@@ -548,11 +555,16 @@ export default function LiveDetectionPage() {
                   </p>
                 ) : null}
                 {debugInfo ? (
-                  <details className="rounded-md border border-muted bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                  <details className="rounded-md border border-muted bg-muted/30 px-3 py-2 text-xs text-muted-foreground" open>
                     <summary className="cursor-pointer font-medium">🔍 Debug 資訊</summary>
+                    <p className="mt-1 break-all font-mono">步驟：{fetchStep}</p>
                     <p className="mt-1 break-all font-mono">{debugInfo}</p>
                   </details>
-                ) : null}
+                ) : (
+                  <p className="rounded-md border border-muted bg-muted/30 px-3 py-2 font-mono text-xs text-muted-foreground">
+                    步驟：{fetchStep}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">
