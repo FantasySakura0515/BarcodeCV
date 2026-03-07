@@ -9,5 +9,6 @@ detection:
 
 decoding:
   pylibdmtx:
-    timeout_ms: 2000
-    shrink: 2
+    timeout_ms: 3000
+    fast_timeout_ms: 3000
+    shrink: 1

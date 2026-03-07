@@ -28,12 +28,12 @@ decoding:
   merge_results: true             # merge results from both scanners
   pylibdmtx:
     timeout_ms: 5000              # higher timeout = finds more codes (used for capture/batch)
-    fast_timeout_ms: 2000         # timeout for live-preview mode (trade-off: speed vs accuracy)
+    fast_timeout_ms: 3000         # timeout for live-preview mode (trade-off: speed vs accuracy)
     # max_count: null             # null = find all codes (no limit)
     shrink: 1                     # 1 = full resolution, 2+ = faster but may miss small codes
     threshold: 50
-    min_edge: 8                   # minimum edge size (px) — lower finds smaller codes
-    max_edge: 200                 # maximum edge size (px) — higher finds larger codes
+    min_edge: 6                   # minimum edge size (px) — lower finds smaller codes
+    max_edge: 300                 # maximum edge size (px) — higher finds larger codes
   zxing:
     formats: ["DataMatrix"]
   preprocessing:
@@ -73,16 +73,16 @@ spatial_matching:
   overlap_threshold: 0.3  # minimum IoU to count a DataMatrix as inside a box
 
 opencv_datamatrix:
-  min_area: 60
-  max_area_ratio: 0.3
+  min_area: 40
+  max_area_ratio: 0.4
   adaptive_block_size: 31
   adaptive_c: 8
   morph_kernel_size: 3
   blur_kernel_size: 5
-  aspect_ratio_min: 0.5
-  aspect_ratio_max: 2.0
-  padding: 20
-  max_candidates: 120
+  aspect_ratio_min: 0.4
+  aspect_ratio_max: 2.5
+  padding: 25
+  max_candidates: 150
   clahe_clip_limit: 3.0
   fallback_full_image: true
 

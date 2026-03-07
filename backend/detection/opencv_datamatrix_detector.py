@@ -129,18 +129,23 @@ class OpenCVDataMatrixDetector:
 		"""Try progressively more aggressive preprocessing until a code is found.
 
 		Variants are ordered cheapest-first. `max_roi_scan_variants` caps how
-		many variants are attempted (use 1-2 for live/fast mode, 6 for batch).
+		many variants are attempted (use 1-2 for live/fast mode, 6+ for batch).
+		Includes blur-resistant variants (unsharp mask, bilateral, morphological).
 		"""
 		variants: list = [
 			lambda: roi,
 			lambda: self._enhance_for_decode(roi),
+			lambda: self._unsharp_mask(roi),
 			lambda: self._invert_variant(roi),
+			lambda: self._bilateral_variant(roi),
 			lambda: self._invert_variant(self._enhance_for_decode(roi)),
+			lambda: self._morphological_sharpen(roi),
 		]
 		# Upscale variants — only useful if ROI is small
-		if min(roi.shape[:2]) < 120:
+		if min(roi.shape[:2]) < 160:
 			variants += [
 				lambda: self._resize_variant(roi, scale=2.0),
+				lambda: self._resize_variant(self._unsharp_mask(roi), scale=2.0),
 				lambda: self._resize_variant(self._enhance_for_decode(roi), scale=2.0),
 			]
 
@@ -152,14 +157,20 @@ class OpenCVDataMatrixDetector:
 		return []
 
 	def _scan_full_frame_variants(self, image: np.ndarray) -> list:
-		"""Try multiple preprocessing variants on the full frame."""
+		"""Try multiple preprocessing variants on the full frame.
+
+		Includes blur-resistant variants for distant/out-of-focus shots.
+		"""
 		all_variants = [
 			lambda: image,
 			lambda: self._enhance_for_decode(image),
+			lambda: self._unsharp_mask(image),
+			lambda: self._bilateral_variant(image),
 			lambda: self._invert_variant(image),
 			lambda: self._binary_variant(image),
-			lambda: self._invert_variant(self._enhance_for_decode(image)),
 			lambda: self._denoise_variant(image),
+			lambda: self._morphological_sharpen(image),
+			lambda: self._invert_variant(self._enhance_for_decode(image)),
 		]
 		for variant_fn in all_variants[: self._max_full_frame_scan_variants]:
 			results = self._scanner.scan(variant_fn())
@@ -187,6 +198,36 @@ class OpenCVDataMatrixDetector:
 		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
 		denoised = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
 		return cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR)
+
+	@staticmethod
+	def _unsharp_mask(image: np.ndarray, sigma: float = 1.0, strength: float = 1.5) -> np.ndarray:
+		"""Unsharp masking — effective against mild motion/focus blur."""
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
+		blurred = cv2.GaussianBlur(gray, (0, 0), sigma)
+		sharpened = cv2.addWeighted(gray, 1.0 + strength, blurred, -strength, 0)
+		return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+
+	@staticmethod
+	def _bilateral_variant(image: np.ndarray) -> np.ndarray:
+		"""Bilateral filter — edge-preserving smoothing followed by CLAHE contrast."""
+		filtered = cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
+		gray = cv2.cvtColor(filtered, cv2.COLOR_BGR2GRAY) if len(filtered.shape) == 3 else filtered.copy()
+		clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+		enhanced = clahe.apply(gray)
+		return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+	@staticmethod
+	def _morphological_sharpen(image: np.ndarray) -> np.ndarray:
+		"""Morphological sharpening — extracts edge detail from blurry images."""
+		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
+		kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+		dilated = cv2.dilate(gray, kernel)
+		eroded = cv2.erode(gray, kernel)
+		edges = dilated - eroded
+		sharpened = cv2.addWeighted(gray, 1.0, edges, 0.5, 0)
+		clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+		sharpened = clahe.apply(sharpened)
+		return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
 
 	def _binary_variant(self, image: np.ndarray) -> np.ndarray:
 		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
@@ -231,16 +272,16 @@ class OpenCVDataMatrixDetector:
 
 	def _detect_candidates(self, image: np.ndarray, max_area: int) -> list[tuple[int, int, int, int]]:
 		gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
-		gray = cv2.GaussianBlur(gray, (self._blur_kernel_size, self._blur_kernel_size), 0)
+		blurred = cv2.GaussianBlur(gray, (self._blur_kernel_size, self._blur_kernel_size), 0)
 		clahe = cv2.createCLAHE(clipLimit=self._clahe_clip_limit, tileGridSize=(8, 8))
-		gray = clahe.apply(gray)
+		enhanced = clahe.apply(blurred)
 
-		# Run adaptive thresholding at two different block sizes to catch
-		# both fine-grained and coarser patterns
+		# Run adaptive thresholding at multiple block sizes to catch
+		# both fine-grained and coarser patterns (important for blurry images)
 		block_sizes = [self._adaptive_block_size]
-		alternative = 15 if self._adaptive_block_size > 15 else 51
-		if alternative != self._adaptive_block_size:
-			block_sizes.append(alternative)
+		for alt in [15, 51, 71]:
+			if alt != self._adaptive_block_size:
+				block_sizes.append(alt)
 
 		kernel = cv2.getStructuringElement(
 			cv2.MORPH_RECT,
@@ -248,9 +289,11 @@ class OpenCVDataMatrixDetector:
 		)
 
 		all_candidates: list[tuple[int, int, int, int]] = []
+
+		# --- Path 1: adaptive threshold (works well on sharp images) ---
 		for block_size in block_sizes:
 			binary = cv2.adaptiveThreshold(
-				gray,
+				enhanced,
 				255,
 				cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
 				cv2.THRESH_BINARY,
@@ -259,34 +302,20 @@ class OpenCVDataMatrixDetector:
 			)
 			binary = cv2.bitwise_not(binary)
 			morphed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+			self._extract_contour_candidates(morphed, max_area, all_candidates)
 
-			contours, _ = cv2.findContours(morphed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-			for contour in contours:
-				area = cv2.contourArea(contour)
-				if area < self._min_area or area > max_area:
-					continue
+		# --- Path 2: Canny edge detection (better for blurry/distant images) ---
+		for low_t, high_t in [(30, 100), (50, 150)]:
+			edges = cv2.Canny(enhanced, low_t, high_t)
+			dilated = cv2.dilate(edges, kernel, iterations=2)
+			self._extract_contour_candidates(dilated, max_area, all_candidates)
 
-				rect = cv2.minAreaRect(contour)
-				width, height = rect[1]
-				if width <= 0 or height <= 0:
-					continue
-
-				ratio = width / height
-				if ratio < self._aspect_ratio_min or ratio > self._aspect_ratio_max:
-					continue
-
-				box = cv2.boxPoints(rect)
-				box = np.int32(box)
-				x, y, w, h = cv2.boundingRect(box)
-				if w <= 0 or h <= 0:
-					continue
-
-				# Relaxed fill_ratio (was 0.25) to avoid missing valid candidates
-				fill_ratio = area / float(w * h)
-				if fill_ratio < 0.15:
-					continue
-
-				all_candidates.append((x, y, x + w, y + h))
+		# --- Path 3: Otsu on unsharp-masked image (handles uniform blur) ---
+		unsharp = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+		_, otsu_binary = cv2.threshold(unsharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+		otsu_binary = cv2.bitwise_not(otsu_binary)
+		morphed_otsu = cv2.morphologyEx(otsu_binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+		self._extract_contour_candidates(morphed_otsu, max_area, all_candidates)
 
 		all_candidates.sort(key=lambda item: (item[2] - item[0]) * (item[3] - item[1]), reverse=True)
 		unique: list[tuple[int, int, int, int]] = []
@@ -296,6 +325,40 @@ class OpenCVDataMatrixDetector:
 			if len(unique) >= self._max_candidates:
 				break
 		return unique
+
+	def _extract_contour_candidates(
+		self,
+		binary: np.ndarray,
+		max_area: int,
+		output: list[tuple[int, int, int, int]],
+	) -> None:
+		"""Extract square-like contour bounding boxes from a binary image."""
+		contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+		for contour in contours:
+			area = cv2.contourArea(contour)
+			if area < self._min_area or area > max_area:
+				continue
+
+			rect = cv2.minAreaRect(contour)
+			width, height = rect[1]
+			if width <= 0 or height <= 0:
+				continue
+
+			ratio = width / height
+			if ratio < self._aspect_ratio_min or ratio > self._aspect_ratio_max:
+				continue
+
+			box = cv2.boxPoints(rect)
+			box = np.int32(box)
+			x, y, w, h = cv2.boundingRect(box)
+			if w <= 0 or h <= 0:
+				continue
+
+			fill_ratio = area / float(w * h)
+			if fill_ratio < 0.15:
+				continue
+
+			output.append((x, y, x + w, y + h))
 
 	def _expand_bbox(
 		self,
@@ -380,8 +443,8 @@ class OpenCVDataMatrixDetector:
 				max_candidates=detector_cfg.get("max_candidates", 120),
 				clahe_clip_limit=detector_cfg.get("clahe_clip_limit", 3.0),
 				fallback_full_image=True,
-				max_roi_scan_variants=3,        # original + enhanced + inverted
-				max_full_frame_scan_variants=4, # original + enhanced + inverted + binary
+				max_roi_scan_variants=5,        # original + enhanced + unsharp + inverted + bilateral
+				max_full_frame_scan_variants=6,  # original + enhanced + unsharp + bilateral + inverted + binary
 			)
 
 		# Full-quality scanner for batch/capture mode

@@ -267,13 +267,14 @@ class CameraService:
         model_type: str = "opencv",
         max_width: int | None = None,
     ) -> DetectionPreviewResult:
-        # When MJPEG stream is active, use the most-recent cached frame.
+        # Always detect on FULL resolution for maximum DataMatrix accuracy.
+        # Bboxes are returned in full-res coordinates; sourceImage reports
+        # the actual dimensions so the frontend overlay scales correctly.
         if _is_streaming(camera_id):
             cached = _get_cached_frame(camera_id)
             if cached is not None:
-                image = self._resize_to_max_width(cached, max_width)
                 return self._detection_service.preview_detection_on_image(
-                    image=image,
+                    image=cached,
                     filename=f"{camera_id}.jpg",
                     model_type=model_type,
                     image_source="camera-preview",
@@ -286,10 +287,8 @@ class CameraService:
                 frame = camera.capture_frame()
             _cache_frame(camera_id, frame.image)
 
-        image = self._resize_to_max_width(frame.image, max_width)
-
         return self._detection_service.preview_detection_on_image(
-            image=image,
+            image=frame.image,
             filename=f"{camera_id}.jpg",
             model_type=model_type,
             image_source="camera-preview",
