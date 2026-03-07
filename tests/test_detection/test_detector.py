@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from src.camera.base import Frame
-from src.detection.detector import DataMatrixDetector
+from backend.camera.base import Frame
+from backend.detection.detector import DataMatrixDetector
 
 
 class TestDataMatrixDetector:

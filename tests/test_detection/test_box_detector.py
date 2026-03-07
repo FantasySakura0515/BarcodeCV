@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from src.detection.box_detector import BoxDetector, BoxDetectionResult
+from backend.detection.box_detector import BoxDetector, BoxDetectionResult
 
 
 def _make_blank(h: int = 480, w: int = 640) -> np.ndarray:

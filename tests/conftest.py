@@ -3,7 +3,7 @@ import sqlite3
 import numpy as np
 import pytest
 
-from src.database.db_manager import SCHEMA_SQL
+from backend.database.db_manager import SCHEMA_SQL
 
 
 @pytest.fixture

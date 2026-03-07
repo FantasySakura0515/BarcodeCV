@@ -1,8 +1,8 @@
 # BarcodeCV
 
-Raspberry Pi 5 雙鏡頭 DataMatrix 掃描系統。
+Raspberry Pi 5 雙鏡頭 DataMatrix 掃描系統，含 FastAPI 後端與 Next.js 前端。
 
-在一個平面上放置數個貼有 DataMatrix 條碼的盒子，系統會自動掃描所有條碼、將每個盒子與其條碼配對，並對**沒有條碼的盒子發出警告**，提示操作者重新擺放。
+在一個平面上放置數個貼有 DataMatrix 條碼的盒子，系統會自動掃描所有條碼、將每個盒子與其條碼配對，並對**沒有條碼的盒子發出警告**。
 
 ---
 
@@ -35,6 +35,48 @@ Raspberry Pi 5 雙鏡頭 DataMatrix 掃描系統。
 | 主機 | Raspberry Pi 5（4GB 或 8GB） |
 | 鏡頭 × 2 | Pi Camera Module（CSI 排線，接 CAM0 / CAM1） |
 | 儲存 | microSD 32GB+ 或 USB SSD |
+
+---
+
+## 快速啟動
+
+### 1. 安裝依賴
+
+```bash
+git clone <repo-url> BarcodeCV
+cd BarcodeCV
+
+# Python 依賴
+pip install -r requirements.txt
+
+# Node.js 依賴
+cd frontend && npm install && cd ..
+```
+
+### 2. 啟動後端（FastAPI，Port 8000）
+
+```bash
+# 在專案根目錄執行
+python -m backend.api
+```
+
+後端啟動後可訪問：
+- API：`http://localhost:8000`
+- 互動文件（Swagger UI）：`http://localhost:8000/docs`
+
+### 3. 啟動前端（Next.js，Port 3000）
+
+```bash
+cd frontend
+
+# 開發模式（含熱重載）
+npm run dev
+
+# 正式模式（需先 build）
+npm run build && npm run start
+```
+
+前端啟動後訪問：`http://localhost:3000`
 
 ---
 
@@ -97,93 +139,32 @@ CAM1 近距離拍攝
 
 ---
 
-## 輸出範例
-
-### 單次掃描（`--mode single`）
-
-```
-=== Scan Summary: 5 boxes found ===
-  [OK] Box #01 -> DMX-2024-A001  (pylibdmtx)
-  [OK] Box #02 -> DMX-2024-A002  (zxing-cpp)
-  [!!] Box #03 -> NO DATAMATRIX  (bbox=(312, 88, 480, 210)) - Please reposition the box!
-  [OK] Box #04 -> DMX-2024-A004  (pylibdmtx)
-  [OK] Box #05 -> DMX-2024-A005  (pylibdmtx)
-
-  1 box needs repositioning.
-```
-
-### 持續掃描（`--mode continuous`）
-
-```
---- Scan cycle 1 ---
-  [OK] DMX-2024-A001 (via pylibdmtx)
-  [OK] DMX-2024-A002 (via pylibdmtx)
-  [!!] Box at bbox=(312, 88, 480, 210) has no DataMatrix — reposition needed
---- Scan cycle 2 ---
-  ...
-```
-
----
-
-## 安裝
-
-```bash
-# 在 Raspberry Pi 5 上
-git clone <repo-url> barcodeCV
-cd barcodeCV
-
-# 一鍵安裝（系統依賴 + Python 虛擬環境）
-bash scripts/setup_pi5.sh
-
-# 啟動虛擬環境
-source venv/bin/activate
-```
-
----
-
-## 使用方式
+## CLI 掃描模式（不使用前端）
 
 ### 單次掃描
 
 ```bash
-python -m src.main --mode single
+python -m backend.main --mode single
 ```
 
 ### 持續掃描
 
 ```bash
-python -m src.main --mode continuous
+python -m backend.main --mode continuous
 ```
 
 每 2 秒自動掃描，按 `Ctrl+C` 停止。
 
 ### 距離校準
 
-找出 Local 鏡頭的最佳拍攝距離：
-
 ```bash
-python -m src.main --mode calibration
-```
-
-輸出範例：
-
-```
-=== CALIBRATION REPORT ===
-Optimal distance: 120mm
-
-   Distance    Sharpness    Decode OK     Time (ms)
---------------------------------------------------
-     50mm        423.1          YES        120.3ms
-    100mm       1102.5          YES         45.2ms
-    120mm       1247.3          YES         38.7ms  <-- BEST
-    150mm        891.0          YES         52.1ms
-    200mm        312.4           NO          0.0ms
+python -m backend.main --mode calibration
 ```
 
 ### 指定配置檔
 
 ```bash
-python -m src.main --config config/pi5_deploy.yaml --mode single
+python -m backend.main --config config/pi5_deploy.yaml --mode single
 ```
 
 ---
@@ -191,14 +172,19 @@ python -m src.main --config config/pi5_deploy.yaml --mode single
 ## 專案架構
 
 ```
-barcodeCV/
+BarcodeCV/
 ├── config/
 │   ├── default.yaml                # 預設配置
 │   └── pi5_deploy.yaml             # Pi 5 部署配置
 │
-├── src/
+├── backend/                        # Python 後端
 │   ├── main.py                     # CLI 入口
-│   ├── pipeline.py                 # 掃描流程協調（Global→Local→配對→存檔）
+│   ├── pipeline.py                 # 掃描流程協調
+│   │
+│   ├── api/
+│   │   ├── __main__.py             # API 啟動入口（python -m backend.api）
+│   │   ├── main.py                 # FastAPI app 與路由
+│   │   └── schemas.py              # Pydantic 資料結構
 │   │
 │   ├── camera/
 │   │   ├── base.py                 # Frame 資料結構 + 抽象介面
@@ -206,7 +192,7 @@ barcodeCV/
 │   │   └── camera_manager.py       # 雙鏡頭管理
 │   │
 │   ├── decoding/
-│   │   ├── direct_scanner.py       # 核心：整張影像掃描（偵測+解碼一步完成）
+│   │   ├── direct_scanner.py       # 整張影像掃描（偵測+解碼）
 │   │   ├── decoder.py              # 解碼器抽象介面
 │   │   ├── pylibdmtx_decoder.py    # pylibdmtx 實作
 │   │   ├── zxing_decoder.py        # zxing-cpp 實作
@@ -214,8 +200,9 @@ barcodeCV/
 │   │
 │   ├── detection/
 │   │   ├── box_detector.py         # OpenCV 盒子偵測（輪廓分析）
+│   │   ├── opencv_datamatrix_detector.py  # OpenCV DataMatrix 偵測
 │   │   ├── spatial_matcher.py      # 盒子 ↔ DataMatrix 空間配對
-│   │   ├── detector.py             # YOLO 模型封裝（optional）
+│   │   ├── detector.py             # YOLO 模型封裝（選配）
 │   │   └── preprocessor.py         # 影像前處理（CLAHE）
 │   │
 │   ├── database/
@@ -224,19 +211,36 @@ barcodeCV/
 │   │
 │   ├── calibration/
 │   │   ├── distance_calibrator.py  # 最佳距離掃描
-│   │   └── focus_scorer.py         # 影像清晰度評分（Laplacian / Tenengrad）
+│   │   └── focus_scorer.py         # 影像清晰度評分
+│   │
+│   ├── services/
+│   │   ├── detection_service.py    # 偵測服務
+│   │   ├── model_service.py        # 模型管理服務
+│   │   └── stats_service.py        # 統計服務
 │   │
 │   └── utils/
 │       ├── config_loader.py        # YAML 載入 + deep merge
-│       ├── coordinate_mapper.py    # Global ↔ Local 座標映射（Homography）
+│       ├── coordinate_mapper.py    # Global ↔ Local 座標映射
 │       ├── image_utils.py          # 裁切 / 銳化 / 對比度增強
 │       └── logger.py               # 日誌設定
 │
-├── training/                       # YOLO 訓練工具（optional，見下方說明）
-├── tests/                          # 單元測試
+├── frontend/                       # Next.js 前端
+│   ├── src/
+│   │   ├── app/                    # Next.js App Router 頁面
+│   │   ├── components/             # UI 元件
+│   │   ├── lib/                    # API 封裝、工具函式
+│   │   ├── stores/                 # Zustand 狀態管理
+│   │   └── types/                  # TypeScript 型別定義
+│   └── package.json
+│
+├── tests/                          # Python 單元測試
+├── training/                       # YOLO 訓練工具（選配）
 ├── scripts/
-│   ├── setup_pi5.sh                # 一鍵安裝腳本
+│   ├── setup_pi5.sh                # Pi 5 一鍵安裝腳本
 │   └── install_dependencies.sh
+├── data/                           # 執行期資料（SQLite DB）
+├── logs/                           # 執行日誌
+├── output/                         # 偵錯圖片、報表
 └── requirements.txt
 ```
 
@@ -246,16 +250,26 @@ barcodeCV/
 
 所有設定在 `config/default.yaml`，可用自訂 YAML 檔覆蓋特定欄位。
 
+### API
+
+```yaml
+api:
+  host: "0.0.0.0"
+  port: 8000
+  cors_origins:
+    - "http://localhost:3000"
+```
+
 ### 鏡頭
 
 ```yaml
 cameras:
   global:
-    camera_num: 0        # CSI CAM0
+    camera_num: 0        # CSI CAM0（廣角）
     width: 1920
     height: 1080
   local:
-    camera_num: 1        # CSI CAM1
+    camera_num: 1        # CSI CAM1（近距離）
     width: 1920
     height: 1080
 ```
@@ -266,24 +280,13 @@ cameras:
 box_detection:
   enabled: true
   min_area: 5000         # 最小輪廓面積（px²），過濾雜訊
-  max_area: 500000       # 最大輪廓面積
+  max_area: 500000
   canny_threshold1: 50
   canny_threshold2: 150
-  morph_kernel_size: 5   # 膨脹核大小，連接斷裂邊緣
-  approx_epsilon: 0.02   # 多邊形近似精度
-  aspect_ratio_min: 0.3  # 長寬比過濾（排除細長噪點）
+  morph_kernel_size: 5
+  approx_epsilon: 0.02
+  aspect_ratio_min: 0.3
   aspect_ratio_max: 3.0
-```
-
-調整提示：
-- 偵測到太多假盒子 → 增加 `min_area`，縮小 `aspect_ratio` 範圍
-- 盒子被漏掉 → 降低 `canny_threshold1`，增加 `morph_kernel_size`
-
-### 空間配對
-
-```yaml
-spatial_matching:
-  overlap_threshold: 0.3   # 最低 IoU 才算配對成功
 ```
 
 ### DataMatrix 解碼
@@ -300,64 +303,43 @@ decoding:
 
 ---
 
-## 資料庫 Schema
-
-```
-scan_sessions
-┌─────────────┐
-│ id (UUID)   │─────────────────────────────────┐
-│ started_at  │                                 │
-│ ended_at    │                                 │
-│ config      │                                 │
-└─────────────┘                                 │
-                                                │
-scan_records                                    │
-┌───────────────────────┐                       │
-│ id (AUTO)             │◄──────────────────┐   │
-│ session_id (FK)       │◄──────────────────┼───┘
-│ decoded_content       │                   │
-│ decode_success        │                   │
-│ decoder_used          │                   │
-│ bbox (x1,y1,x2,y2)   │                   │
-│ image_source          │                   │
-│ decode_time_ms        │                   │
-└───────────────────────┘                   │
-                                            │
-box_records                                 │
-┌───────────────────────┐                   │
-│ id (AUTO)             │                   │
-│ session_id (FK)       │───────────────────┘
-│ status                │  "matched" | "missing_datamatrix"
-│ box_bbox (x1,y1,x2,y2)│
-│ box_area              │
-│ scan_record_id (FK)   │──→ scan_records.id（若 matched）
-│ decoded_content       │
-│ overlap_ratio         │  IoU 值
-└───────────────────────┘
-```
-
----
-
 ## 技術棧
+
+### 後端
 
 | 技術 | 用途 |
 |------|------|
 | Python 3.11+ | 主要語言 |
+| FastAPI + uvicorn | REST API 伺服器 |
 | Picamera2 | Pi Camera Module 驅動 |
-| pylibdmtx | DataMatrix 偵測與解碼（主要） |
-| zxing-cpp | DataMatrix 偵測與解碼（備援） |
-| OpenCV | 盒子輪廓偵測、影像前處理 |
+| pylibdmtx | DataMatrix 解碼（主要） |
+| zxing-cpp | DataMatrix 解碼（備援） |
+| OpenCV | 盒子偵測、影像前處理 |
 | SQLite3 | 結果持久化（WAL mode） |
 | PyYAML | 配置管理 |
+
+### 前端
+
+| 技術 | 用途 |
+|------|------|
+| Next.js 16 | React 框架 |
+| TypeScript | 型別安全 |
+| Tailwind CSS | 樣式 |
+| Zustand | 狀態管理 |
+| shadcn/ui | UI 元件庫 |
+
+---
+
+## 執行測試
+
+```bash
+pytest tests/
+```
 
 ---
 
 ## 選配：YOLO 訓練
 
-預設的 library 掃描模式對大多數場景已足夠。若遇到以下情況可考慮訓練 YOLO 模型：
+預設的 library 掃描模式（pylibdmtx + zxing-cpp）對大多數場景已足夠。若遇到 DataMatrix 非常小或距離鏡頭較遠的情況，可考慮訓練 YOLO 模型。
 
-- DataMatrix 非常小（< 5mm）且距離鏡頭較遠
-- Library 持續遺漏肉眼可見的碼
-- 需要在不解碼的情況下快速計算碼的數量
-
-訓練工具已備於 `training/` 目錄，詳見 [training/README.md](training/README.md)。
+訓練工具於 `training/` 目錄，詳見 [training/README.md](training/README.md)。

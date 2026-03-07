@@ -76,14 +76,17 @@ class PylibdmtxScanner:
             elapsed = (time.perf_counter() - start) * 1000
 
             results = []
+            image_height = image.shape[0]
             for item in decoded:
                 content = item.data.decode("utf-8")
                 # pylibdmtx returns Rect(left, top, width, height)
+                # `top` is measured from the image bottom, so convert it back
+                # to OpenCV's top-left origin before exposing the bbox.
                 rect = item.rect
                 x1 = rect.left
-                y1 = rect.top
                 x2 = rect.left + rect.width
-                y2 = rect.top + rect.height
+                y2 = image_height - rect.top
+                y1 = y2 - rect.height
 
                 # If shrink was used, scale coordinates back
                 if self._shrink > 1:
@@ -91,6 +94,11 @@ class PylibdmtxScanner:
                     y1 *= self._shrink
                     x2 *= self._shrink
                     y2 *= self._shrink
+
+                x1 = max(0, int(x1))
+                y1 = max(0, int(y1))
+                x2 = max(x1, int(x2))
+                y2 = max(y1, int(y2))
 
                 results.append(ScanResult(
                     content=content,
@@ -120,7 +128,19 @@ class PylibdmtxScanner:
 
 
 class ZxingScanner:
-    """Scan entire image for multiple DataMatrix codes using zxing-cpp."""
+    """Scan entire image for multiple DataMatrix codes using zxing-cpp.
+
+    Supports trying multiple binarizers to increase recognition rate.
+    """
+
+    def __init__(self, try_harder: bool = True):
+        """
+        Args:
+            try_harder: When True, also tries GlobalHistogram and FixedThreshold
+                        binarizers in addition to the default LocalAverage.
+                        Increases recognition rate at the cost of extra CPU time.
+        """
+        self._try_harder = try_harder
 
     def scan(self, image: np.ndarray) -> list[ScanResult]:
         """Scan image for all DataMatrix codes. Returns list of ScanResult."""
@@ -129,35 +149,57 @@ class ZxingScanner:
         start = time.perf_counter()
 
         try:
-            barcodes = zxingcpp.read_barcodes(
-                image, formats=zxingcpp.BarcodeFormat.DataMatrix
-            )
-            elapsed = (time.perf_counter() - start) * 1000
-
-            results = []
-            for barcode in barcodes:
-                # Extract bounding box from position
-                pos = barcode.position
-                points = [
-                    (pos.top_left.x, pos.top_left.y),
-                    (pos.top_right.x, pos.top_right.y),
-                    (pos.bottom_right.x, pos.bottom_right.y),
-                    (pos.bottom_left.x, pos.bottom_left.y),
+            binarizers = [zxingcpp.Binarizer.LocalAverage]
+            if self._try_harder:
+                binarizers += [
+                    zxingcpp.Binarizer.GlobalHistogram,
+                    zxingcpp.Binarizer.FixedThreshold,
                 ]
-                xs = [p[0] for p in points]
-                ys = [p[1] for p in points]
-                x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
 
-                results.append(ScanResult(
-                    content=barcode.text,
-                    bbox=(x1, y1, x2, y2),
-                    scanner_used="zxing-cpp",
-                    scan_time_ms=elapsed,
-                    success=True,
-                ))
+            all_contents: set[str] = set()
+            results: list[ScanResult] = []
+
+            for binarizer in binarizers:
+                barcodes = zxingcpp.read_barcodes(
+                    image,
+                    formats=zxingcpp.BarcodeFormat.DataMatrix,
+                    binarizer=binarizer,
+                )
+                for barcode in barcodes:
+                    text = barcode.text
+                    if not text or text in all_contents:
+                        continue
+                    all_contents.add(text)
+                    pos = barcode.position
+                    points = [
+                        (pos.top_left.x, pos.top_left.y),
+                        (pos.top_right.x, pos.top_right.y),
+                        (pos.bottom_right.x, pos.bottom_right.y),
+                        (pos.bottom_left.x, pos.bottom_left.y),
+                    ]
+                    xs = [p[0] for p in points]
+                    ys = [p[1] for p in points]
+                    x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+                    results.append(ScanResult(
+                        content=text,
+                        bbox=(x1, y1, x2, y2),
+                        scanner_used="zxing-cpp",
+                        scan_time_ms=0,
+                        success=True,
+                    ))
+
+            elapsed = (time.perf_counter() - start) * 1000
+            for r in results:
+                r.scan_time_ms = elapsed
 
             logger.info("zxing-cpp found %d codes in %.1fms", len(results), elapsed)
-            return results
+            return results if results else [ScanResult(
+                content="",
+                bbox=(0, 0, 0, 0),
+                scanner_used="zxing-cpp",
+                scan_time_ms=elapsed,
+                success=False,
+            )]
 
         except Exception as e:
             elapsed = (time.perf_counter() - start) * 1000
@@ -225,8 +267,6 @@ class CompositeScanner:
         dec_cfg = config.get("decoding", {})
         dmtx_cfg = dec_cfg.get("pylibdmtx", {})
 
-        primary_name = dec_cfg.get("primary_decoder", "pylibdmtx")
-        fallback_name = dec_cfg.get("fallback_decoder", "zxing")
         merge = dec_cfg.get("merge_results", True)
 
         pylibdmtx = PylibdmtxScanner(
@@ -234,14 +274,9 @@ class CompositeScanner:
             max_count=dmtx_cfg.get("max_count"),
             shrink=dmtx_cfg.get("shrink", 1),
             threshold=dmtx_cfg.get("threshold", 50),
-            min_edge=dmtx_cfg.get("min_edge", 10),
-            max_edge=dmtx_cfg.get("max_edge", 100),
+            min_edge=dmtx_cfg.get("min_edge", 8),
+            max_edge=dmtx_cfg.get("max_edge", 200),
         )
-        zxing = ZxingScanner()
+        zxing = ZxingScanner(try_harder=True)
 
-        scanner_map = {"pylibdmtx": pylibdmtx, "zxing": zxing}
-
-        primary = scanner_map.get(primary_name, pylibdmtx)
-        fallback = scanner_map.get(fallback_name) if fallback_name else None
-
-        return CompositeScanner(primary=primary, fallback=fallback, merge_results=merge)
+        return CompositeScanner(primary=pylibdmtx, fallback=zxing, merge_results=merge)

@@ -3,8 +3,8 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from src.camera.base import Frame
-from src.camera.camera_manager import CameraManager
+from backend.camera.base import Frame
+from backend.camera.camera_manager import CameraManager
 
 
 class TestCameraManager:

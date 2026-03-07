@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from src.database.repository import ScanRecord, ScanRepository
+from backend.database.repository import ScanRecord, ScanRepository
 
 
 class TestScanRepository:

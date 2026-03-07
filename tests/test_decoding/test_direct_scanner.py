@@ -1,8 +1,10 @@
-from unittest.mock import MagicMock, patch
+import sys
+from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 
-from src.decoding.direct_scanner import (
+from backend.decoding.direct_scanner import (
     CompositeScanner,
     PylibdmtxScanner,
     ScanResult,
@@ -91,3 +93,42 @@ class TestCompositeScanner:
         scanner = CompositeScanner.from_config(config)
         assert "pylibdmtx" in scanner.name()
         assert "zxing" in scanner.name()
+
+
+class TestPylibdmtxScanner:
+    def test_converts_bottom_origin_bbox_to_top_origin(self):
+        scanner = PylibdmtxScanner()
+        image = np.zeros((100, 120, 3), dtype=np.uint8)
+
+        pil_module = ModuleType("PIL")
+        pil_module.Image = SimpleNamespace(fromarray=lambda array: array)
+
+        pylibdmtx_package = ModuleType("pylibdmtx")
+        pylibdmtx_module = ModuleType("pylibdmtx.pylibdmtx")
+        pylibdmtx_module.decode = lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                data=b"DM-001",
+                rect=SimpleNamespace(left=10, top=30, width=20, height=15),
+            )
+        ]
+
+        previous_modules = {
+            name: sys.modules.get(name)
+            for name in ("PIL", "pylibdmtx", "pylibdmtx.pylibdmtx")
+        }
+
+        sys.modules["PIL"] = pil_module
+        sys.modules["pylibdmtx"] = pylibdmtx_package
+        sys.modules["pylibdmtx.pylibdmtx"] = pylibdmtx_module
+
+        try:
+            results = scanner.scan(image)
+        finally:
+            for name, module in previous_modules.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
+        assert len(results) == 1
+        assert results[0].bbox == (10, 55, 30, 70)

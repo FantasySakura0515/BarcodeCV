@@ -19,11 +19,11 @@ def load_config(config_path: str | None = None) -> dict:
     """Load YAML config, merging user config over defaults."""
     default_path = Path(__file__).parent.parent.parent / "config" / "default.yaml"
 
-    with open(default_path) as f:
+    with open(default_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     if config_path and Path(config_path).exists():
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             user_config = yaml.safe_load(f)
         if user_config:
             config = deep_merge(config, user_config)

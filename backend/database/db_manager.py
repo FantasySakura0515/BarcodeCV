@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS scan_records (
     wide_image_path      TEXT,
     closeup_image_path   TEXT,
     camera_distance_mm   REAL,
+    remark               TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (session_id) REFERENCES scan_sessions(id)
 );
@@ -74,6 +75,22 @@ CREATE TABLE IF NOT EXISTS box_records (
 
 CREATE INDEX IF NOT EXISTS idx_box_records_session ON box_records(session_id);
 CREATE INDEX IF NOT EXISTS idx_box_records_status  ON box_records(status);
+
+CREATE TABLE IF NOT EXISTS model_registry (
+    id             TEXT PRIMARY KEY,
+    model_name     TEXT NOT NULL,
+    model_type     TEXT NOT NULL,
+    model_version  TEXT NOT NULL,
+    framework      TEXT NOT NULL,
+    model_path     TEXT,
+    is_active      INTEGER NOT NULL DEFAULT 0,
+    remark         TEXT,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_registry_type ON model_registry(model_type);
+CREATE INDEX IF NOT EXISTS idx_model_registry_active ON model_registry(is_active);
 """
 
 
@@ -87,7 +104,7 @@ class DatabaseManager:
 
     def connect(self) -> sqlite3.Connection:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path)
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys=ON")
         if self._wal_mode:
@@ -99,8 +116,20 @@ class DatabaseManager:
         if self._conn is None:
             raise RuntimeError("Not connected. Call connect() first.")
         self._conn.executescript(SCHEMA_SQL)
+        self._ensure_column("scan_records", "remark", "TEXT")
         self._conn.commit()
         logger.info("Database schema initialized")
+
+    def _ensure_column(self, table_name: str, column_name: str, column_sql: str) -> None:
+        if self._conn is None:
+            raise RuntimeError("Not connected. Call connect() first.")
+
+        rows = self._conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        if column_name not in existing_columns:
+            self._conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"
+            )
 
     def get_connection(self) -> sqlite3.Connection:
         if self._conn is None:

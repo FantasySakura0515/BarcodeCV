@@ -1,10 +1,10 @@
 """BarcodeCV - Dual-camera DataMatrix scanner for Raspberry Pi 5.
 
 Usage:
-    python -m src.main --mode single                    # One-shot scan
-    python -m src.main --mode continuous                # Continuous scanning
-    python -m src.main --mode calibration               # Camera distance calibration
-    python -m src.main --config config/pi5_deploy.yaml  # Use Pi 5 config
+    python -m backend.main --mode single                    # One-shot scan
+    python -m backend.main --mode continuous                # Continuous scanning
+    python -m backend.main --mode calibration               # Camera distance calibration
+    python -m backend.main --config config/pi5_deploy.yaml  # Use Pi 5 config
 """
 
 import argparse

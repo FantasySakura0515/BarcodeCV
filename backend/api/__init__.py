@@ -1,0 +1,1 @@
+"""BarcodeCV FastAPI backend package."""
