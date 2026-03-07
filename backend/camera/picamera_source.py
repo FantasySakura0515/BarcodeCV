@@ -25,14 +25,23 @@ class PiCameraSource(CameraSource):
         self._picam = None
 
     def open(self) -> None:
+        from libcamera import controls
         from picamera2 import Picamera2
 
         self._picam = Picamera2(camera_num=self._camera_num)
-        config = self._picam.create_still_configuration(
-            main={"size": (self._width, self._height), "format": "RGB888"}
+        config = self._picam.create_video_configuration(
+            main={"size": (self._width, self._height), "format": "BGR888"}
         )
         self._picam.configure(config)
         self._picam.start()
+
+        # Enable continuous autofocus if supported (e.g. imx708)
+        try:
+            self._picam.set_controls({"AfMode": controls.AfModeEnum.Continuous})
+            logger.info("Autofocus enabled for PiCamera %d", self._camera_num)
+        except (RuntimeError, KeyError):
+            logger.info("Autofocus not available for PiCamera %d (manual lens)", self._camera_num)
+
         logger.info(
             "Opened PiCamera %d (%s) at %dx%d",
             self._camera_num,
@@ -52,9 +61,8 @@ class PiCameraSource(CameraSource):
         if self._picam is None:
             raise RuntimeError(f"Camera {self._camera_id} is not open")
 
-        # capture_array returns RGB; convert to BGR for OpenCV compatibility
-        rgb_array = self._picam.capture_array()
-        bgr_array = rgb_array[:, :, ::-1].copy()
+        # BGR888 format — already OpenCV compatible, no channel swap needed
+        bgr_array = self._picam.capture_array()
 
         return Frame(
             image=bgr_array,
