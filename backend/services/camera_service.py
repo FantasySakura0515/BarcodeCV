@@ -145,16 +145,39 @@ class CameraService:
     def _probe_by_type(self, source_type: str, camera_num: int) -> tuple[bool, str | None]:
         if source_type == "opencv":
             return self._probe_opencv(camera_num)
+        return self._probe_picamera(camera_num)
 
+    def _probe_picamera(self, camera_num: int) -> tuple[bool, str | None]:
+        """Probe a PiCamera by first checking global_camera_info, then opening."""
+        # Step 1: non-invasive check — picamera2 can list cameras without opening them
+        available_cams = PiCameraSource.available_cameras()
+        if available_cams:
+            available_nums = [info.get("Num", i) for i, info in enumerate(available_cams)]
+            if camera_num not in available_nums:
+                logger.info(
+                    "PiCamera %d not in detected cameras %s", camera_num, available_nums
+                )
+                return False, f"鏡頭 {camera_num} 未找到 (可用: {available_nums})"
+            # Camera index exists — return info without fully opening it
+            info = available_cams[available_nums.index(camera_num)]
+            model = info.get("Model", "unknown")
+            return True, f"picam{camera_num} ({model})"
+
+        # Step 2: fallback — try opening (may be slower, ensures picamera2 works)
+        source = PiCameraSource(camera_num=camera_num)
         try:
-            source = PiCameraSource(camera_num=camera_num)
             source.open()
             frame = source.capture_frame()
-            source.close()
             return True, f"{frame.resolution[0]}x{frame.resolution[1]}"
         except Exception as exc:
-            logger.info("Picamera probe failed for camera %s: %s", camera_num, exc)
+            logger.info("Picamera probe failed for camera %d: %s", camera_num, exc)
             return False, str(exc)
+        finally:
+            # Always release resources, even if capture_frame() raised
+            try:
+                source.close()
+            except Exception:
+                pass
 
     def _probe_opencv(self, camera_num: int) -> tuple[bool, str | None]:
         source = OpenCVCameraSource(camera_num=camera_num)
