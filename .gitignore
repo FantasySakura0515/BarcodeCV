@@ -39,7 +39,7 @@ logs/
 *.log
 
 # Model files (large binaries)
-models/
+/models/
 *.pt
 *.onnx
 *.ncnn
