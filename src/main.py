@@ -36,7 +36,7 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["single", "continuous", "calibration"],
+        choices=["single", "continuous", "preview", "calibration"],
         default=None,
         help="Run mode (overrides config)",
     )
@@ -56,11 +56,83 @@ def main():
 
     if mode == "calibration":
         _run_calibration(config)
+    elif mode == "preview":
+        _run_preview(config)
     elif mode in ("single", "continuous"):
         _run_scanning(config, mode)
     else:
         logger.error("Unknown mode: %s", mode)
         sys.exit(1)
+
+
+def _run_preview(config: dict):
+    """Live dual-camera preview with box/DataMatrix overlay. Press 'q' to quit."""
+    import logging
+
+    import cv2
+
+    from .detection.box_detector import BoxDetector
+    from .detection.preprocessor import preprocess_for_detection
+
+    logger = logging.getLogger("barcodecv")
+
+    camera_manager = CameraManager.from_config(config)
+    scanner = CompositeScanner.from_config(config)
+
+    box_cfg = config.get("box_detection", {})
+    box_detector = BoxDetector.from_config(config) if box_cfg.get("enabled", False) else None
+
+    with camera_manager:
+        logger.info("Preview started — press 'q' to quit")
+
+        while True:
+            global_frame = camera_manager.capture_global()
+            local_frame = camera_manager.capture_local()
+
+            global_img = global_frame.image.copy()
+            local_img = local_frame.image.copy()
+
+            # Box detection overlay on global image
+            if box_detector is not None:
+                processed = preprocess_for_detection(global_frame.image)
+                boxes = box_detector.detect(processed)
+                for i, box in enumerate(boxes):
+                    x1, y1, x2, y2 = box.bbox
+                    cv2.rectangle(global_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(global_img, f"Box {i+1}", (x1, y1 - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            # DataMatrix scan overlay on global image
+            scan_results = scanner.scan(preprocess_for_detection(global_frame.image))
+            for r in scan_results:
+                if r.success:
+                    x1, y1, x2, y2 = r.bbox
+                    cv2.rectangle(global_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                    cv2.putText(global_img, r.content[:20], (x1, y2 + 18),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+            # Labels
+            cv2.putText(global_img, "Global (CAM0)", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+            cv2.putText(local_img, "Local (CAM1)", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+
+            # Resize both to same height for side-by-side display
+            h = min(global_img.shape[0], local_img.shape[0], 540)
+            g_w = int(global_img.shape[1] * h / global_img.shape[0])
+            l_w = int(local_img.shape[1] * h / local_img.shape[0])
+            global_resized = cv2.resize(global_img, (g_w, h))
+            local_resized = cv2.resize(local_img, (l_w, h))
+
+            combined = cv2.hconcat([global_resized, local_resized])
+            cv2.imshow("BarcodeCV Preview", combined)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+
+        cv2.destroyAllWindows()
+        logger.info("Preview stopped")
 
 
 def _run_scanning(config: dict, mode: str):
