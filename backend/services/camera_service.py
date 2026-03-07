@@ -53,6 +53,18 @@ def _get_cached_frame(camera_id: str) -> np.ndarray | None:
     return frame
 
 
+# ── Per-camera MJPEG stream registry ───────────────────────────────────────
+# Tracks which cameras currently have an active MJPEG stream thread.
+# Detection endpoints skip camera open/close and use the frame cache instead.
+_ACTIVE_STREAMS: dict[str, bool] = {}
+_ACTIVE_STREAMS_MU = threading.Lock()
+
+
+def _is_streaming(camera_id: str) -> bool:
+    with _ACTIVE_STREAMS_MU:
+        return _ACTIVE_STREAMS.get(camera_id, False)
+
+
 @dataclass
 class CameraInfo:
     id: str
@@ -103,6 +115,15 @@ class CameraService:
         return cameras
 
     def capture_preview(self, camera_id: str, max_width: int | None = None, quality: int = 70) -> bytes:
+        # When MJPEG stream is active, return the most recent cached frame instantly.
+        if _is_streaming(camera_id):
+            cached = _get_cached_frame(camera_id)
+            if cached is not None:
+                image = self._resize_to_max_width(cached, max_width)
+                ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), max(30, min(quality, 95))])
+                if ok:
+                    return encoded.tobytes()
+
         lock = _get_camera_lock(camera_id)
         # Try to acquire without blocking so detection never freezes the preview.
         acquired = lock.acquire(timeout=0.08)  # 80 ms non-blocking try
@@ -130,7 +151,103 @@ class CameraService:
         finally:
             lock.release()
 
+    def stream_mjpeg(
+        self,
+        camera_id: str,
+        max_width: int | None = None,
+        quality: int = 75,
+    ):
+        """Yield MJPEG multipart frame bytes (for StreamingResponse).
+
+        Opens the physical camera exactly once and captures in a tight loop —
+        the same behaviour as `python -m backend.main --mode preview`.  The
+        frame cache is updated on every capture so that concurrent detection
+        calls can use a cached frame without waiting for the camera lock.
+
+        If a second client hits this endpoint while the camera is already
+        streaming, frames are served from the cache at up to ~30 fps without
+        reopening the camera.
+        """
+        import queue as _queue
+
+        # ── Secondary client: camera already streaming → serve from cache ──
+        if _is_streaming(camera_id):
+            import time as _t
+            while True:
+                cached = _get_cached_frame(camera_id)
+                if cached is not None:
+                    image = self._resize_to_max_width(cached, max_width)
+                    ok, enc = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), max(30, min(quality, 95))])
+                    if ok:
+                        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + enc.tobytes() + b"\r\n"
+                _t.sleep(0.033)  # ~30 fps
+            return
+
+        # ── Primary client: open camera, stream until disconnect ────────────
+        frame_q: _queue.Queue[bytes | None] = _queue.Queue(maxsize=4)
+        stop_event = threading.Event()
+
+        with _ACTIVE_STREAMS_MU:
+            _ACTIVE_STREAMS[camera_id] = True
+
+        def _capture_loop() -> None:
+            lock = _get_camera_lock(camera_id)
+            lock.acquire()
+            try:
+                with self._create_camera_source(camera_id) as cam:
+                    while not stop_event.is_set():
+                        try:
+                            frame = cam.capture_frame()
+                        except Exception as exc:
+                            logger.warning("mjpeg capture error for %s: %s", camera_id, exc)
+                            break
+                        _cache_frame(camera_id, frame.image)
+                        image = self._resize_to_max_width(frame.image, max_width)
+                        ok, enc = cv2.imencode(
+                            ".jpg", image,
+                            [int(cv2.IMWRITE_JPEG_QUALITY), max(30, min(quality, 95))],
+                        )
+                        if ok:
+                            try:
+                                frame_q.put_nowait(enc.tobytes())
+                            except _queue.Full:
+                                pass  # drop frame; client is slow
+            finally:
+                lock.release()
+                with _ACTIVE_STREAMS_MU:
+                    _ACTIVE_STREAMS.pop(camera_id, None)
+                frame_q.put(None)  # sentinel — signal generator to stop
+
+        thread = threading.Thread(target=_capture_loop, daemon=True, name=f"mjpeg-{camera_id}")
+        thread.start()
+
+        try:
+            while True:
+                try:
+                    jpg = frame_q.get(timeout=5.0)
+                except _queue.Empty:
+                    break
+                if jpg is None:
+                    break
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
+        finally:
+            stop_event.set()
+            thread.join(timeout=5.0)
+
     def capture_and_detect(self, camera_id: str, model_type: str = "opencv") -> DetectionRunResult:
+        # When MJPEG stream owns the camera, use the continuously-updated cache
+        # instead of trying to acquire the lock (which would block forever).
+        if _is_streaming(camera_id):
+            cached = _get_cached_frame(camera_id)
+            if cached is not None:
+                return self._detection_service.run_detection_on_image(
+                    image=cached,
+                    filename=f"{camera_id}.jpg",
+                    model_type=model_type,
+                    image_source="camera",
+                    camera_id=camera_id,
+                )
+
         with _get_camera_lock(camera_id):
             with self._create_camera_source(camera_id) as camera:
                 frame = camera.capture_frame()
@@ -150,6 +267,20 @@ class CameraService:
         model_type: str = "opencv",
         max_width: int | None = None,
     ) -> DetectionPreviewResult:
+        # When MJPEG stream is active, use the most-recent cached frame.
+        if _is_streaming(camera_id):
+            cached = _get_cached_frame(camera_id)
+            if cached is not None:
+                image = self._resize_to_max_width(cached, max_width)
+                return self._detection_service.preview_detection_on_image(
+                    image=image,
+                    filename=f"{camera_id}.jpg",
+                    model_type=model_type,
+                    image_source="camera-preview",
+                    camera_id=camera_id,
+                    save_preview_image=False,
+                )
+
         with _get_camera_lock(camera_id):
             with self._create_camera_source(camera_id) as camera:
                 frame = camera.capture_frame()

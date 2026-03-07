@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, CameraRotate, Play, Stop, WarningCircle } from "@phosphor-icons/react";
 
 import { EmptyState } from "@/components/common/empty-state";
@@ -60,7 +60,6 @@ export default function LiveDetectionPage() {
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
   const browserStreamRef = useRef<MediaStream | null>(null);
   const browserPreviewUrlRef = useRef<string | null>(null);
-  const previewChainRef = useRef<{ cancelled: boolean; timer: number | null } | null>(null);
 
   const selectedCamera = useMemo(
     () => cameras.find((item) => item.id === selectedCameraId) ?? null,
@@ -198,42 +197,14 @@ export default function LiveDetectionPage() {
     };
   }, [isPreviewing, performanceProfile.detectIntervalMs, performanceProfile.detectWidth, selectedCamera, selectedCameraId]);
 
-  useEffect(() => {
+  // MJPEG stream URL for backend cameras — browser handles frame updates natively.
+  // Detection runs concurrently by reading the server-side frame cache.
+  const streamUrl = useMemo(() => {
     if (!isPreviewing || !selectedCameraId || selectedCamera?.sourceScope !== "backend") {
-      return;
+      return null;
     }
-
-    const chain = { cancelled: false, timer: null as number | null };
-    previewChainRef.current = chain;
-
-    // kick off first request immediately
-    setPreviewUrl(
-      `/api/cameras/${selectedCameraId}/preview?ts=${Date.now()}&maxWidth=${performanceProfile.previewWidth}&quality=${Math.round(performanceProfile.jpegQuality * 100)}`,
-    );
-
-    return () => {
-      chain.cancelled = true;
-      if (chain.timer !== null) {
-        window.clearTimeout(chain.timer);
-        chain.timer = null;
-      }
-    };
-  }, [isPreviewing, performanceProfile.jpegQuality, performanceProfile.previewIntervalMs, performanceProfile.previewWidth, selectedCamera?.sourceScope, selectedCameraId]);
-
-  // Called by DetectionCanvas when the preview img finishes loading.
-  // Schedules the next preview request after previewIntervalMs, giving the server
-  // a breathing window and preventing in-flight request pile-up.
-  const handlePreviewLoad = useCallback(() => {
-    const chain = previewChainRef.current;
-    if (!chain || chain.cancelled) return;
-    chain.timer = window.setTimeout(() => {
-      if (chain.cancelled) return;
-      chain.timer = null;
-      setPreviewUrl(
-        `/api/cameras/${selectedCameraId!}/preview?ts=${Date.now()}&maxWidth=${performanceProfile.previewWidth}&quality=${Math.round(performanceProfile.jpegQuality * 100)}`,
-      );
-    }, performanceProfile.previewIntervalMs);
-  }, [selectedCameraId, performanceProfile.previewIntervalMs, performanceProfile.previewWidth, performanceProfile.jpegQuality]);
+    return `/api/cameras/${selectedCameraId}/stream?maxWidth=${performanceProfile.previewWidth}&quality=${Math.round(performanceProfile.jpegQuality * 100)}`;
+  }, [isPreviewing, selectedCameraId, selectedCamera?.sourceScope, performanceProfile.previewWidth, performanceProfile.jpegQuality]);
 
   const selectedObject = objects.find((item) => item.bid === selectedBid) ?? null;
 
@@ -658,12 +629,11 @@ export default function LiveDetectionPage() {
               </div>
             ) : (
               <DetectionCanvas
-                imageUrl={previewUrl}
+                imageUrl={isPreviewing && selectedCamera?.sourceScope === "backend" ? streamUrl : previewUrl}
                 objects={objects}
                 selectedBid={selectedBid}
                 onSelect={setSelectedBid}
                 sourceImageSize={overlaySourceSize}
-                onImageLoad={handlePreviewLoad}
               />
             )}
           </SectionCard>

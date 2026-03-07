@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .schemas import (
@@ -215,6 +215,34 @@ def get_camera_preview(camera_id: str, maxWidth: int | None = 640, quality: int 
         raise HTTPException(status_code=503, detail=f"無法取得鏡頭畫面: {exc}") from exc
 
     return Response(content=image_bytes, media_type="image/jpeg")
+
+
+@app.get("/api/cameras/{camera_id}/stream")
+def stream_camera_mjpeg(camera_id: str, maxWidth: int | None = None, quality: int = 75) -> StreamingResponse:
+    """MJPEG live stream endpoint.
+
+    Keeps the physical camera open and pushes frames continuously as
+    multipart/x-mixed-replace. Browsers can consume this directly via:
+        <img src="/api/cameras/{id}/stream">
+
+    Frame rate is limited only by camera capture speed and JPEG encoding.
+    Detection calls run concurrently by reading the frame cache.
+    """
+    try:
+        def _gen():
+            yield from get_camera_service().stream_mjpeg(camera_id, max_width=maxWidth, quality=quality)
+
+        return StreamingResponse(
+            _gen(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-cache, no-store",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/api/cameras/{camera_id}/capture-detection", response_model=DetectionResponse)
