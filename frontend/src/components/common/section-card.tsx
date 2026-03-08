@@ -14,7 +14,7 @@ export function SectionCard({
   children: ReactNode;
 }) {
   return (
-    <Card className="rounded-xl border-border/50 bg-card/60 backdrop-blur-md shadow-sm">
+    <Card className="rounded-xl border bg-card shadow-sm">
       <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
         <div>
           <CardTitle>{title}</CardTitle>

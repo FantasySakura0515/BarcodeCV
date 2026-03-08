@@ -13,14 +13,14 @@ export function UploadDropzone({
   fileName?: string;
 }) {
   return (
-    <Card className="border-dashed border-primary/30 bg-primary/5">
+    <Card className="border-dashed bg-card">
       <CardContent className="flex flex-col items-center justify-center gap-4 py-10 text-center">
-        <div className="rounded-full bg-background p-3 text-primary shadow-sm">
-          <UploadSimple size={24} weight="duotone" />
+        <div className="rounded-full bg-muted p-3 text-muted-foreground">
+          <UploadSimple size={22} />
         </div>
         <div>
-          <p className="text-base font-medium">拖曳圖片到此處或直接選擇檔案</p>
-          <p className="mt-1 text-sm text-muted-foreground">支援單張圖片，送到後端執行 DataMatrix 偵測與解碼。</p>
+          <p className="text-base font-medium">Upload an image file</p>
+          <p className="mt-1 text-sm text-muted-foreground">Supports a single image. The file will be sent to backend detection service.</p>
         </div>
         <label>
           <input
@@ -30,7 +30,7 @@ export function UploadDropzone({
             onChange={(event) => onFileSelect(event.target.files?.[0] ?? null)}
           />
           <Button asChild>
-            <span>選擇圖片</span>
+            <span>Select file</span>
           </Button>
         </label>
         {fileName ? (

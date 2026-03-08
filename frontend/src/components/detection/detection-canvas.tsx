@@ -32,9 +32,7 @@ export function DetectionCanvas({
 
   useEffect(() => {
     const element = containerRef.current;
-    if (!element) {
-      return;
-    }
+    if (!element) return;
 
     const updateSize = () => {
       const rect = element.getBoundingClientRect();
@@ -50,9 +48,7 @@ export function DetectionCanvas({
   }, []);
 
   const frame = useMemo(() => {
-    if (!imageSize || !containerSize.width || !containerSize.height) {
-      return null;
-    }
+    if (!imageSize || !containerSize.width || !containerSize.height) return null;
 
     const containerRatio = containerSize.width / containerSize.height;
     const imageRatio = imageSize.width / imageSize.height;
@@ -60,34 +56,19 @@ export function DetectionCanvas({
     if (containerRatio > imageRatio) {
       const height = containerSize.height;
       const width = height * imageRatio;
-      return {
-        width,
-        height,
-        left: (containerSize.width - width) / 2,
-        top: 0,
-      };
+      return { width, height, left: (containerSize.width - width) / 2, top: 0 };
     }
 
     const width = containerSize.width;
     const height = width / imageRatio;
-    return {
-      width,
-      height,
-      left: 0,
-      top: (containerSize.height - height) / 2,
-    };
+    return { width, height, left: 0, top: (containerSize.height - height) / 2 };
   }, [containerSize, imageSize]);
 
-  const overlaySourceSize = sourceImageSize?.width && sourceImageSize?.height
-    ? sourceImageSize
-    : imageSize;
+  const overlaySourceSize = sourceImageSize?.width && sourceImageSize?.height ? sourceImageSize : imageSize;
 
   return (
-    <div className="relative overflow-hidden rounded-3xl border bg-card/70 p-3 shadow-sm">
-      <div
-        ref={containerRef}
-        className="relative h-[min(62vh,40rem)] min-h-80 overflow-hidden rounded-2xl bg-[linear-gradient(135deg,#f8fafc,#dbeafe)] dark:bg-[linear-gradient(135deg,#0f172a,#1e293b)]"
-      >
+    <div className="relative overflow-hidden rounded-xl border bg-card p-3 shadow-sm">
+      <div ref={containerRef} className="relative h-[min(62vh,40rem)] min-h-80 overflow-hidden rounded-lg bg-muted/40">
         {imageUrl ? (
           <>
             <img
@@ -95,10 +76,7 @@ export function DetectionCanvas({
               alt="Detection preview"
               className="absolute inset-0 h-full w-full object-contain"
               onLoad={(event) => {
-                setImageSize({
-                  width: event.currentTarget.naturalWidth,
-                  height: event.currentTarget.naturalHeight,
-                });
+                setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight });
                 onImageLoad?.();
               }}
             />
@@ -112,15 +90,13 @@ export function DetectionCanvas({
                   return (
                     <motion.button
                       key={item.bid}
-                      initial={{ opacity: 0, scale: 0.96 }}
+                      initial={{ opacity: 0, scale: 0.98 }}
                       animate={{ opacity: 1, scale: 1 }}
                       type="button"
                       onClick={() => onSelect?.(item.bid)}
                       className={cn(
-                        "absolute rounded-xl border-2 text-left outline-none transition-all",
-                        active
-                          ? "border-sky-400 shadow-[0_0_0_9999px_rgba(15,23,42,0.12)]"
-                          : "border-emerald-400/90 hover:border-emerald-300",
+                        "absolute rounded-md border-2 text-left outline-none transition-all",
+                        active ? "border-sky-500 shadow-[0_0_0_9999px_rgba(15,23,42,0.10)]" : "border-emerald-500/90 hover:border-emerald-400",
                       )}
                       style={{
                         left: frame.left + (item.bbox.x1 / overlaySourceSize.width) * frame.width,
@@ -129,7 +105,7 @@ export function DetectionCanvas({
                         height: (height / overlaySourceSize.height) * frame.height,
                       }}
                     >
-                      <span className="absolute -top-7 left-0 max-w-40 truncate rounded-full bg-background/95 px-2 py-1 text-[10px] font-medium shadow-sm">
+                      <span className="absolute -top-7 left-0 max-w-40 truncate rounded bg-background px-2 py-1 text-[10px] font-medium shadow-sm">
                         {item.bid}
                       </span>
                     </motion.button>
@@ -138,9 +114,7 @@ export function DetectionCanvas({
               : null}
           </>
         ) : (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            請先上傳圖片開始辨識
-          </div>
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No image loaded. Upload or capture an image to begin.</div>
         )}
       </div>
     </div>
