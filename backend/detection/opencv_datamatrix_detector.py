@@ -87,12 +87,39 @@ class OpenCVDataMatrixDetector:
 		self._fast_candidate_detection = fast_candidate_detection
 		self._parallel_workers = parallel_workers
 
-	def detect_and_decode(self, image: np.ndarray) -> list[OpenCVDataMatrixResult]:
+	def detect_and_decode(
+		self,
+		image: np.ndarray,
+		skip_bboxes: list[tuple[int, int, int, int]] | None = None,
+	) -> list[OpenCVDataMatrixResult]:
+		"""Detect and decode DataMatrix codes in *image*.
+
+		Args:
+			image: BGR frame to scan.
+			skip_bboxes: Bounding boxes of codes already confirmed in a previous
+				frame.  Any candidate ROI whose expanded bbox overlaps a skip_bbox
+				by IoU >= 0.35 is dropped, saving scan time and focusing effort
+				on regions that have NOT yet been decoded.
+		"""
 		start = time.perf_counter()
 		h, w = image.shape[:2]
 		max_area = max(int(h * w * self._max_area_ratio), self._min_area)
 
 		candidates = self._detect_candidates(image, max_area=max_area)
+
+		# Drop candidates whose region is already covered by a known bbox,
+		# so we spend all scanning budget on *new* undecoded regions.
+		if skip_bboxes:
+			filtered: list[tuple[int, int, int, int]] = []
+			for cand in candidates:
+				exp = self._expand_bbox(cand, image.shape)
+				if any(self._iou(exp, kb) >= 0.35 for kb in skip_bboxes):
+					continue
+				filtered.append(cand)
+			skipped = len(candidates) - len(filtered)
+			if skipped:
+				logger.debug("Skipped %d/%d candidates overlapping known bboxes", skipped, len(candidates))
+			candidates = filtered
 
 		# --- Parallel ROI scanning -------------------------------------------
 		# Flat task pool: pre-compute all (candidate × variant) images on the
@@ -194,7 +221,7 @@ class OpenCVDataMatrixDetector:
 		For small ROIs (≤200×200 px) all variants complete in < 10ms total.
 		Returns a list of pre-processed images (up to max_roi_scan_variants).
 		"""
-		variant_fns: list = [
+		standard_fns: list = [
 			lambda: roi,
 			lambda: self._enhance_from_gray(gray),
 			lambda: self._unsharp_mask_gray(gray),
@@ -204,13 +231,38 @@ class OpenCVDataMatrixDetector:
 			lambda: self._morphological_sharpen_gray(gray),
 			lambda: self._jpeg_artifact_variant_gray(gray),
 		]
-		if min(roi.shape[:2]) < 320:
-			variant_fns += [
+		# Upscale variants: put FIRST so a small budget (max_roi_scan_variants=5)
+		# still reaches them.  Previously they were appended after 8 standard
+		# variants and were never reached in fast mode.
+		side = min(roi.shape[:2])
+		if side < 64:
+			# Tiny ROI — zxing needs ≥ 2 px/module; 3× upscale is mandatory.
+			upscale_fns = [
+				lambda: self._resize_variant(roi, scale=3.0),
+				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=3.0),
+				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=3.0),
 				lambda: self._resize_variant(roi, scale=2.0),
-				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=2.0),
 				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
+			]
+			variant_fns = upscale_fns + standard_fns
+		elif side < 160:
+			# Small ROI — 2× upscale first.
+			upscale_fns = [
+				lambda: self._resize_variant(roi, scale=2.0),
+				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
+				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=2.0),
 				lambda: self._resize_variant(self._jpeg_artifact_variant_gray(gray), scale=2.0),
 			]
+			variant_fns = upscale_fns + standard_fns
+		elif side < 320:
+			# Moderately small — prepend 2× but keep standard variants available.
+			upscale_fns = [
+				lambda: self._resize_variant(roi, scale=2.0),
+				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
+			]
+			variant_fns = upscale_fns + standard_fns
+		else:
+			variant_fns = standard_fns
 		# Evaluate eagerly — only as many as we'll actually scan.
 		return [fn() for fn in variant_fns[: self._max_roi_scan_variants]]
 
@@ -232,15 +284,19 @@ class OpenCVDataMatrixDetector:
 		≈ 27 sequential rounds.
 		"""
 		# Phase 1: pre-compute all variant images on main thread.
-		all_tasks: list[tuple[int, int, np.ndarray]] = []  # (x1, y1, variant_img)
+		# Task = (roi_x1, roi_y1, roi_w, roi_h, variant_img)
+		# roi_w/roi_h are stored so we can normalise scanner bbox coords from
+		# the variant-image space back to ROI space in the worker.
+		all_tasks: list[tuple[int, int, int, int, np.ndarray]] = []
 		for bbox in candidates:
 			x1, y1, x2, y2 = self._expand_bbox(bbox, image.shape)
 			roi = crop_region(image, (x1, y1, x2, y2))
 			if roi.size == 0:
 				continue
+			roi_h, roi_w = roi.shape[:2]
 			gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
 			for vi in self._precompute_roi_variant_images(roi, gray_roi):
-				all_tasks.append((x1, y1, vi))
+				all_tasks.append((x1, y1, roi_w, roi_h, vi))
 
 		if not all_tasks:
 			return []
@@ -251,10 +307,15 @@ class OpenCVDataMatrixDetector:
 		found_contents: set[str] = set()
 		abort = threading.Event()
 
-		def _scan_task(task: tuple[int, int, np.ndarray]) -> None:
+		def _scan_task(task: tuple[int, int, int, int, np.ndarray]) -> None:
 			if abort.is_set():
 				return
-			x1, y1, variant_img = task
+			x1, y1, roi_w, roi_h, variant_img = task
+			# Normalise variant-space bbox → ROI space so the final image-absolute
+			# bbox is correct even when the variant is an upscaled copy.
+			var_h, var_w = variant_img.shape[:2]
+			sx = roi_w / max(var_w, 1)
+			sy = roi_h / max(var_h, 1)
 			decoded = self._scanner.scan(variant_img)
 			for item in decoded:
 				if not item.success or not item.content:
@@ -268,10 +329,10 @@ class OpenCVDataMatrixDetector:
 					results.append(OpenCVDataMatrixResult(
 						content=item.content,
 						bbox=(
-							x1 + int(item.bbox[0]),
-							y1 + int(item.bbox[1]),
-							x1 + int(item.bbox[2]),
-							y1 + int(item.bbox[3]),
+							x1 + int(item.bbox[0] * sx),
+							y1 + int(item.bbox[1] * sy),
+							x1 + int(item.bbox[2] * sx),
+							y1 + int(item.bbox[3] * sy),
 						),
 						confidence=0.95,
 						decoder_used=item.scanner_used,
@@ -394,6 +455,89 @@ class OpenCVDataMatrixDetector:
 
 		return results
 
+	def detect_two_stage_on(
+		self,
+		detection_image: np.ndarray,
+		original_image: np.ndarray,
+		detection_scale: float,
+		skip_bboxes: list[tuple[int, int, int, int]] | None = None,
+	) -> list["OpenCVDataMatrixResult"]:
+		"""Locate on *detection_image*, scan on *original_image*.
+
+		Args:
+			detection_image: Downscaled image used for cheap contour detection.
+			original_image:  Full-resolution image used for high-quality scanning.
+			detection_scale: ``detection_width / original_width``.
+			skip_bboxes:     Already-decoded bboxes to skip (original coords).
+		"""
+		start = time.perf_counter()
+		h, w = detection_image.shape[:2]
+		max_area = max(int(h * w * self._max_area_ratio), self._min_area)
+		candidates_det = self._detect_candidates(detection_image, max_area=max_area)
+
+		if not candidates_det:
+			logger.debug("Two-stage: no candidates on detection image")
+			return []
+
+		# Project back to original-image coordinate space.
+		if detection_scale != 1.0:
+			inv = 1.0 / detection_scale
+			candidates_orig = [
+				(int(x1 * inv), int(y1 * inv), int(x2 * inv), int(y2 * inv))
+				for x1, y1, x2, y2 in candidates_det
+			]
+		else:
+			candidates_orig = candidates_det
+
+		# Filter already-known barcodes.
+		if skip_bboxes:
+			candidates_orig = [
+				c for c in candidates_orig
+				if not any(
+					self._iou(self._expand_bbox(c, original_image.shape), kb) >= 0.35
+					for kb in skip_bboxes
+				)
+			]
+
+		if not candidates_orig:
+			return []
+
+		elapsed_det = (time.perf_counter() - start) * 1000
+		logger.debug(
+			"Two-stage detect: %d candidates in %.1fms, scanning on original",
+			len(candidates_orig), elapsed_det,
+		)
+
+		# Scan at original resolution — upscale variants in _scan_roi_variants
+		# now start from crisp high-res pixels instead of a compressed thumbnail.
+		results = (
+			self._scan_candidates_flat_parallel(original_image, candidates_orig)
+			if self._parallel_workers > 1
+			else self._scan_candidates_sequential(original_image, candidates_orig)
+		)
+
+		# Full-frame fallback on original image when nothing found by ROI scan.
+		if not results and self._fallback_full_image:
+			decoded_full = (
+				self._scan_full_frame_variants_parallel(original_image)
+				if self._parallel_workers > 1
+				else self._scan_full_frame_variants(original_image)
+			)
+			for item in decoded_full:
+				if item.success and item.content:
+					results.append(OpenCVDataMatrixResult(
+						content=item.content,
+						bbox=tuple(int(v) for v in item.bbox),
+						confidence=0.88,
+						decoder_used=item.scanner_used,
+						detection_source="full-frame",
+						scan_time_ms=item.scan_time_ms,
+					))
+
+		elapsed_total = (time.perf_counter() - start) * 1000
+		logger.debug("Two-stage total: %d codes in %.1fms", len(results), elapsed_total)
+		return self._deduplicate(results)
+
 	def decode_bboxes(
 		self,
 		image: np.ndarray,
@@ -450,7 +594,7 @@ class OpenCVDataMatrixDetector:
 		if gray is None:
 			gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
 
-		variants: list = [
+		standard_variants: list = [
 			lambda: roi,
 			lambda: self._enhance_from_gray(gray),
 			lambda: self._unsharp_mask_gray(gray),
@@ -460,22 +604,53 @@ class OpenCVDataMatrixDetector:
 			lambda: self._morphological_sharpen_gray(gray),
 			lambda: self._jpeg_artifact_variant_gray(gray),
 		]
-		# Upscale variants: useful when ROI is small OR when image was downscaled
-		# before reaching this stage (e.g. live mode at 35-65% resolution).
-		# Threshold raised from 160 to 320 to catch codes that are physically
-		# large but blurry / JPEG-compressed.
-		if min(roi.shape[:2]) < 320:
-			variants += [
+		# Upscale variants — prepended (not appended) so they're tried first on
+		# small ROIs even when max_roi_scan_variants is low (e.g. 5 in live mode).
+		side = min(roi.shape[:2])
+		if side < 64:
+			upscale_fns = [
+				lambda: self._resize_variant(roi, scale=3.0),
+				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=3.0),
+				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=3.0),
 				lambda: self._resize_variant(roi, scale=2.0),
-				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=2.0),
 				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
+			]
+			variants = upscale_fns + standard_variants
+		elif side < 160:
+			upscale_fns = [
+				lambda: self._resize_variant(roi, scale=2.0),
+				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
+				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=2.0),
 				lambda: self._resize_variant(self._jpeg_artifact_variant_gray(gray), scale=2.0),
 			]
-
+			variants = upscale_fns + standard_variants
+		elif side < 320:
+			upscale_fns = [
+				lambda: self._resize_variant(roi, scale=2.0),
+				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
+			]
+			variants = upscale_fns + standard_variants
+		else:
+			variants = standard_variants
+		roi_h, roi_w = roi.shape[:2]
 		for variant_fn in variants[: self._max_roi_scan_variants]:
-			decoded = self._scanner.scan(variant_fn())
+			var_img = variant_fn()
+			decoded = self._scanner.scan(var_img)
 			successful = [item for item in decoded if item.success and item.content]
 			if successful:
+				# If the variant was upscaled, bbox coords are in the upscaled space;
+				# normalise them back to ROI space before returning so callers can
+				# safely add the ROI origin (x1, y1) to get image-absolute coords.
+				var_h, var_w = var_img.shape[:2]
+				if var_w != roi_w or var_h != roi_h:
+					sx = roi_w / max(var_w, 1)
+					sy = roi_h / max(var_h, 1)
+					for item in successful:
+						bx1, by1, bx2, by2 = item.bbox
+						item.bbox = (
+							int(bx1 * sx), int(by1 * sy),
+							int(bx2 * sx), int(by2 * sy),
+						)
 				return successful
 		return []
 
@@ -685,7 +860,9 @@ class OpenCVDataMatrixDetector:
 			morphed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
 			self._extract_contour_candidates(morphed, max_area, all_candidates)
 
-			edges = cv2.Canny(enhanced, 40, 120)
+			# Lower Canny thresholds (20/80 vs old 40/120) to catch faint, fine
+			# edges of small or distant DataMatrix codes.
+			edges = cv2.Canny(enhanced, 20, 80)
 			dilated = cv2.dilate(edges, kernel, iterations=2)
 			self._extract_contour_candidates(dilated, max_area, all_candidates)
 		else:
@@ -834,7 +1011,9 @@ class OpenCVDataMatrixDetector:
 			scanner = CompositeScanner(primary=zxing, fallback=None, merge_results=False)
 			return OpenCVDataMatrixDetector(
 				scanner=scanner,
-				min_area=detector_cfg.get("min_area", 60),
+				# Lower min_area to 30 so tiny DataMatrix codes (small physical size
+				# or far from camera) are not discarded during candidate detection.
+				min_area=detector_cfg.get("min_area", 30),
 				max_area_ratio=detector_cfg.get("max_area_ratio", 0.3),
 				adaptive_block_size=detector_cfg.get("adaptive_block_size", 31),
 				adaptive_c=detector_cfg.get("adaptive_c", 8),
@@ -849,27 +1028,33 @@ class OpenCVDataMatrixDetector:
 				max_candidates=detector_cfg.get("fast_max_candidates", 35),
 				clahe_clip_limit=detector_cfg.get("clahe_clip_limit", 3.0),
 				fallback_full_image=True,
-				# 3 variants: original + enhanced + unsharp.  More than enough for
-				# live preview; aggressive variants (denoising, morphological) are
-				# reserved for batch mode where latency is less critical.
-				max_roi_scan_variants=3,
+				# 5 variants: for normal ROIs → original + enhanced + unsharp + invert
+				# + bilateral.  For small ROIs (< 160 px side) upscale variants are
+				# PREPENDED so the 5-slot budget is spent on 2×/3× upscaled versions
+				# first — the most impactful fix for small DataMatrix in live mode.
+				max_roi_scan_variants=5,
 				max_full_frame_scan_variants=4,
 				# Speed mode: full-frame only when ROI found nothing
 				full_frame_always_supplement=False,
-			# Fast candidate detection: 1 adaptive-threshold + 1 Canny pass
-			fast_candidate_detection=True,
-			# Flat task pool: 2×cpu_count workers keeps the pool full even when
-			# a thread briefly holds the GIL for OpenCV preprocessing.
-			# Pi 5 (4 cores) → 8 workers: ceil(35 cand × 3 variants / 8) = 14
-			# rounds × ~15ms ≈ 210ms vs old ceil(35/4) × 3 × 15ms ≈ 405ms.
-			parallel_workers=min(8, (os.cpu_count() or 4) * 2),
-		)
+				# Fast candidate detection: 1 adaptive-threshold + 1 Canny pass
+				fast_candidate_detection=True,
+				# Flat task pool: 2×cpu_count workers keeps the pool full even when
+				# a thread briefly holds the GIL for OpenCV preprocessing.
+				# Pi 5 (4 cores) → 8 workers: ceil(35 cand × 5 variants / 8) = 22
+				# rounds × ~15ms ≈ 330ms vs old ceil(35/4)×3×15ms ≈ 405ms.
+				parallel_workers=min(8, (os.cpu_count() or 4) * 2),
+			)
 
 		# Full-quality scanner for batch/capture mode
 		dec_cfg = config.get("decoding", {})
 		dmtx_cfg = dec_cfg.get("pylibdmtx", {})
 		pylibdmtx = PylibdmtxScanner(
-			timeout_ms=dmtx_cfg.get("timeout_ms", 5000),
+			# 600ms budget: adaptive-timeout scales this to ~150ms for typical
+			# ROI crops (≤200×200 px) and up to 600ms only for large regions
+			# (full res frame).  Pylibdmtx either finds a code fast or it won't;
+			# 5000ms was pure waste.  If the user needs a higher ceiling they can
+			# Set decoding.pylibdmtx.timeout_ms in default.yaml.
+			timeout_ms=dmtx_cfg.get("timeout_ms", 600),
 			max_count=dmtx_cfg.get("max_count"),
 			shrink=dmtx_cfg.get("shrink", 1),
 			threshold=dmtx_cfg.get("threshold", 50),
@@ -890,11 +1075,18 @@ class OpenCVDataMatrixDetector:
 			aspect_ratio_min=detector_cfg.get("aspect_ratio_min", 0.5),
 			aspect_ratio_max=detector_cfg.get("aspect_ratio_max", 2.0),
 			padding=detector_cfg.get("padding", 20),
-			max_candidates=detector_cfg.get("max_candidates", 100),
+			# Batch: 70 candidates is thorough without triggering 7×70=490 sequential calls.
+			# Flat parallel pool handles all 490 tasks across workers simultaneously.
+			max_candidates=detector_cfg.get("max_candidates", 70),
 			clahe_clip_limit=detector_cfg.get("clahe_clip_limit", 3.0),
 			fallback_full_image=detector_cfg.get("fallback_full_image", True),
 			max_roi_scan_variants=7,           # original+enhanced+unsharp+invert+bilateral+morphological+jpeg_artifact
 			max_full_frame_scan_variants=8,    # same set for full-frame
 			# Accuracy mode: full-frame supplements ROI to catch any missed codes
 			full_frame_always_supplement=True,
+			# Batch mode also benefits from parallel scanning: pylibdmtx releases
+			# the GIL during its C-level decode, so 8 workers gives near-linear
+			# speedup.  70 cand × 7 variants = 490 tasks / 8 workers ≈ 62 rounds
+			# × ~150ms ≈ 9s vs old 490 × 150ms sequential = 73s.
+			parallel_workers=min(8, (os.cpu_count() or 4) * 2),
 		)

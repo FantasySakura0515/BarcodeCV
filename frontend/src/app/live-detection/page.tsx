@@ -62,12 +62,36 @@ function scaleDimension(value: number, scale: number, minimum = 320) {
   return Math.min(value, Math.max(minimum, Math.round(value * scale)));
 }
 
+/**
+ * Merge newly detected objects into the stable set.
+ * - Objects with a decoded barcodeValue are kept indefinitely (stable bbox wins on update).
+ * - Incoming barcodes always update the bbox so display tracks movement.
+ */
+function mergeStableObjects(
+  stable: DetectionObject[],
+  incoming: DetectionObject[],
+): DetectionObject[] {
+  const byValue = new Map<string, DetectionObject>();
+  for (const obj of stable) {
+    if (obj.barcodeValue) byValue.set(obj.barcodeValue, obj);
+  }
+  for (const obj of incoming) {
+    if (obj.barcodeValue) byValue.set(obj.barcodeValue, obj); // fresh bbox wins
+  }
+  // Normalise bid to barcodeValue so every entry in stableObjects has a
+  // globally-unique, frame-independent key — prevents React duplicate-key
+  // warnings when different frames assign different bids to the same barcode.
+  return [...byValue.values()].map((obj) => ({ ...obj, bid: obj.barcodeValue! }));
+}
+
 export default function LiveDetectionPage() {
   const [cameras, setCameras] = useState<LiveCameraOption[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<string>("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [rid, setRid] = useState<string | null>(null);
   const [objects, setObjects] = useState<DetectionObject[]>([]);
+  /** Accumulated decoded barcodes across frames — never flickers out once found. */
+  const [stableObjects, setStableObjects] = useState<DetectionObject[]>([]);
   const [selectedBid, setSelectedBid] = useState<string | null>(null);
   const [isLoadingCameras, setIsLoadingCameras] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
@@ -245,6 +269,7 @@ export default function LiveDetectionPage() {
               const elapsedMs = Date.now() - cycleStart;
               syncCameraActualResolution(selectedCameraId, response.sourceImage);
               setObjects(response.objects);
+              setStableObjects((prev) => mergeStableObjects(prev, response.objects));
               setOverlaySourceSize(response.sourceImage ?? null);
               setSelectedBid((current) => current ?? response.objects[0]?.bid ?? null);
               setLastScanInfo({ count: response.objects.length, elapsedMs, at: new Date() });
@@ -255,6 +280,7 @@ export default function LiveDetectionPage() {
             if (!cancelled) {
               const elapsedMs = Date.now() - cycleStart;
               setObjects(response.objects);
+              setStableObjects((prev) => mergeStableObjects(prev, response.objects));
               setOverlaySourceSize(response.sourceImage ?? null);
               setSelectedBid((current) => current ?? response.objects[0]?.bid ?? null);
               setLastScanInfo({ count: response.objects.length, elapsedMs, at: new Date() });
@@ -298,12 +324,14 @@ export default function LiveDetectionPage() {
     return `/api/cameras/${selectedCameraId}/stream?maxWidth=${previewWidth}&quality=${Math.round(performanceProfile.jpegQuality * 100)}`;
   }, [isPreviewing, performanceProfile.jpegQuality, performanceProfile.previewScale, performanceTargetSize, selectedCamera?.sourceScope, selectedCamera?.width, selectedCameraId]);
 
-  const selectedObject = objects.find((item) => item.bid === selectedBid) ?? null;
+  const displayObjects = isPreviewing ? stableObjects : objects;
+  const selectedObject = displayObjects.find((item) => item.bid === selectedBid) ?? null;
 
   function handleCameraChange(cameraId: string) {
     setSelectedCameraId(cameraId);
     setIsPreviewing(false);
     setObjects([]);
+    setStableObjects([]);
     setSelectedBid(null);
     setRid(null);
     setOverlaySourceSize(null);
@@ -399,6 +427,7 @@ export default function LiveDetectionPage() {
     }
 
     setObjects([]);
+    setStableObjects([]);
     setSelectedBid(null);
     setRid(null);
     setOverlaySourceSize(null);
@@ -421,6 +450,7 @@ export default function LiveDetectionPage() {
     setIsPreviewing(false);
     setIsScanningLive(false);
     setLastScanInfo(null);
+    setStableObjects([]);
     stopBrowserStream();
     setOverlaySourceSize(null);
   }
@@ -834,13 +864,13 @@ export default function LiveDetectionPage() {
                   ) : lastScanInfo ? (
                     <div className="absolute right-5 top-5 z-30 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm">
                       <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                      {lastScanInfo.count > 0 ? `找到 ${lastScanInfo.count} 個` : "未偵測到"} · {lastScanInfo.elapsedMs}ms
+                      {stableObjects.length > 0 ? `已鎖定 ${stableObjects.length} 個` : "未偵測到"} · {lastScanInfo.elapsedMs}ms
                     </div>
                   ) : null
                 )}
                 <DetectionCanvas
                   imageUrl={isPreviewing && selectedCamera?.sourceScope === "backend" ? streamUrl : previewUrl}
-                  objects={objects}
+                  objects={isPreviewing ? stableObjects : objects}
                   selectedBid={selectedBid}
                   onSelect={setSelectedBid}
                   sourceImageSize={overlaySourceSize}
@@ -850,8 +880,8 @@ export default function LiveDetectionPage() {
           </SectionCard>
 
           <SectionCard title="辨識結果列表" description="按下擷取後，當前影格的辨識結果會存入後端資料庫。">
-            {objects.length ? (
-              <ObjectResultTable items={objects} selectedBid={selectedBid} onSelect={setSelectedBid} />
+            {(isPreviewing ? stableObjects : objects).length ? (
+              <ObjectResultTable items={isPreviewing ? stableObjects : objects} selectedBid={selectedBid} onSelect={setSelectedBid} />
             ) : (
               <EmptyState
                 title={isLoadingCameras ? "正在載入鏡頭" : "尚未取得即時辨識結果"}

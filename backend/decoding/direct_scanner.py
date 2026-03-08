@@ -60,7 +60,7 @@ class PylibdmtxScanner:
         pixel_count = image.shape[0] * image.shape[1]
         ref_area = 640 * 640
         adaptive_timeout = max(
-            200,  # floor: 200ms minimum for any ROI
+            150,  # floor: 150ms — most ROI crops decode within 150ms or not at all
             min(self._timeout_ms, int(self._timeout_ms * (pixel_count / ref_area))),
         )
 

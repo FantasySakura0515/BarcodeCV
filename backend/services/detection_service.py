@@ -49,6 +49,11 @@ class DetectionService:
         )
         self._output_dir = Path(config.get("system", {}).get("image_output_dir", "./output/images"))
         self._output_dir.mkdir(parents=True, exist_ok=True)
+        # Per-camera cache of already-decoded barcodes for live detection.
+        # Key: camera_id → list of (barcode_content, (x1, y1, x2, y2)) in original image space.
+        # Regions already confirmed do not need re-scanning; effort is redirected
+        # to undiscovered barcodes visible in the frame.
+        self._live_known: dict[str, list[tuple[str, tuple[int, int, int, int]]]] = {}
 
     def run_detection(self, file_bytes: bytes, filename: str, model_type: str = "opencv") -> DetectionRunResult:
         image = self._decode_image(file_bytes)
@@ -127,7 +132,7 @@ class DetectionService:
         model = self._model_service.get_active_model(model_type)
 
         input_path = self._save_image(image, f"{rid}_{Path(filename).stem}_preview.png") if save_preview_image else None
-        detections = self._apply_confidence_filter(self._detect_objects(image, fast=True))
+        detections = self._apply_confidence_filter(self._detect_objects(image, fast=True, camera_id=camera_id))
         objects = self._build_detection_objects(
             rid=rid,
             now=now,
@@ -147,8 +152,19 @@ class DetectionService:
             source_image={"width": int(image.shape[1]), "height": int(image.shape[0])},
         )
 
-    def _detect_objects(self, image: np.ndarray, fast: bool) -> list[OpenCVDataMatrixResult]:
+    def _detect_objects(
+        self,
+        image: np.ndarray,
+        fast: bool,
+        camera_id: str | None = None,
+    ) -> list[OpenCVDataMatrixResult]:
         detector = self._fast_detector if fast else self._detector
+
+        # Build skip_bboxes from previous-frame known barcodes for live mode.
+        skip_bboxes: list[tuple[int, int, int, int]] | None = None
+        if fast and camera_id and camera_id in self._live_known:
+            skip_bboxes = [bbox for _, bbox in self._live_known[camera_id]] or None
+
         if fast and self._box_detection_enabled and self._box_detector is not None and self._spatial_matcher is not None:
             boxes = self._detect_boxes_fast(image)
             if boxes:
@@ -158,13 +174,26 @@ class DetectionService:
                 # fast path — the OpenCVDataMatrixDetector already does a
                 # full-frame fallback when a box ROI fails to decode.
                 dm_detections = detector.decode_bboxes(image, [box.bbox for box in boxes])
-                return self._merge_box_and_dm(boxes, dm_detections)
+                results = self._merge_box_and_dm(boxes, dm_detections)
+                self._update_live_known(camera_id, results)
+                return results
 
             downscaled, scale = self._resize_for_fast_scan(image, target_width=1280)
-            dm_detections = detector.detect_and_decode(downscaled)
-            return self._scale_dm_results(dm_detections, scale)
+            # Two-stage: detect on downscaled thumbnail (fast contour detection),
+            # then scan each candidate at ORIGINAL resolution (high quality).
+            # This is the critical fix for small DataMatrix codes: detection runs
+            # on the cheap downscaled image, but the actual zxing scan gets crisp
+            # full-resolution pixels, so upscale variants work on real detail.
+            results = detector.detect_two_stage_on(
+                detection_image=downscaled,
+                original_image=image,
+                detection_scale=scale,
+                skip_bboxes=skip_bboxes,  # already in original-image coords
+            )
+            self._update_live_known(camera_id, results)
+            return results
 
-        dm_detections = detector.detect_and_decode(image)
+        dm_detections = detector.detect_and_decode(image, skip_bboxes=skip_bboxes)
 
         if not self._box_detection_enabled or self._box_detector is None or self._spatial_matcher is None:
             return dm_detections
@@ -174,6 +203,28 @@ class DetectionService:
             return dm_detections
 
         return self._merge_box_and_dm(boxes, dm_detections)
+
+    def _update_live_known(
+        self,
+        camera_id: str | None,
+        results: list[OpenCVDataMatrixResult],
+    ) -> None:
+        """Merge newly decoded barcodes into the per-camera known-bbox cache.
+
+        Only barcodes with decoded content are stored.  The latest bbox always
+        wins (assumes camera/objects may have moved slightly between frames).
+        """
+        if not camera_id:
+            return
+        existing = {content: bbox for content, bbox in self._live_known.get(camera_id, [])}
+        for r in results:
+            if r.content:
+                existing[r.content] = tuple(int(v) for v in r.bbox)  # type: ignore[assignment]
+        self._live_known[camera_id] = [(c, b) for c, b in existing.items()]
+
+    def clear_live_known(self, camera_id: str) -> None:
+        """Reset the tracking cache for a camera (call on stop / camera switch)."""
+        self._live_known.pop(camera_id, None)
 
     def _merge_box_and_dm(self, boxes, dm_detections: list[OpenCVDataMatrixResult]) -> list[OpenCVDataMatrixResult]:
         if self._spatial_matcher is None:
