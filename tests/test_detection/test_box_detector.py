@@ -104,3 +104,10 @@ class TestBoxDetector:
         cv2.rectangle(img, (100, 80), (300, 240), 255, 3)
         results = self.detector.detect(img)
         assert len(results) == 1
+
+    def test_deduplicate_prefers_tighter_bbox_when_contained(self):
+        outer = BoxDetectionResult(bbox=(80, 60, 320, 260), area=48000, contour=np.empty((0, 1, 2)))
+        inner = BoxDetectionResult(bbox=(100, 80, 300, 240), area=32000, contour=np.empty((0, 1, 2)))
+        deduped = self.detector._deduplicate([outer, inner])
+        assert len(deduped) == 1
+        assert deduped[0].bbox == (100, 80, 300, 240)

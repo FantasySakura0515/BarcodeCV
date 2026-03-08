@@ -71,11 +71,11 @@ class BoxDetector:
 
         # Path 1: classic Canny on CLAHE-enhanced image
         edges = cv2.Canny(enhanced, self._canny_t1, self._canny_t2)
-        masks.append(cv2.dilate(edges, kernel, iterations=2))
+        masks.append(cv2.dilate(edges, kernel, iterations=1))
 
         # Path 2: lower-threshold Canny on bilateral-filtered image for blurry edges
         edges_soft = cv2.Canny(bilateral, max(10, int(self._canny_t1 * 0.6)), max(30, int(self._canny_t2 * 0.75)))
-        masks.append(cv2.dilate(edges_soft, kernel, iterations=2))
+        masks.append(cv2.dilate(edges_soft, kernel, iterations=1))
 
         # Path 3: adaptive threshold for low-contrast / uneven lighting scenes
         adaptive = cv2.adaptiveThreshold(
@@ -87,13 +87,13 @@ class BoxDetector:
             5,
         )
         adaptive = cv2.bitwise_not(adaptive)
-        masks.append(cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel, iterations=2))
+        masks.append(cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel, iterations=1))
 
         # Path 4: Otsu threshold on sharpened image
         sharpened = cv2.addWeighted(enhanced, 1.4, cv2.GaussianBlur(enhanced, (0, 0), 1.0), -0.4, 0)
         _, otsu = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         otsu = cv2.bitwise_not(otsu)
-        masks.append(cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=2))
+        masks.append(cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=1))
 
         results: list[BoxDetectionResult] = []
         for mask in masks:
@@ -146,18 +146,42 @@ class BoxDetector:
         if solidity < 0.75:
             return None
 
+        margin = max(2, int(min(w, h) * 0.06))
         return BoxDetectionResult(
-            bbox=(x, y, x + w, y + h),
+            bbox=(max(0, x - margin), max(0, y - margin), x + w + margin, y + h + margin),
             area=area,
             contour=contour,
         )
 
     def _deduplicate(self, results: list[BoxDetectionResult]) -> list[BoxDetectionResult]:
+        """Deduplicate overlapping/contained candidates while preferring tighter boxes.
+
+        Multi-path contour extraction often returns both an outer rectangle and
+        an inner rectangle for the same physical box. Keeping the larger one
+        causes coordinate drift and duplicate detections in synthetic and real
+        scenes. We prefer the tighter (smaller-area) candidate when two boxes
+        strongly overlap or mostly contain each other.
+        """
         deduped: list[BoxDetectionResult] = []
-        for item in sorted(results, key=lambda r: r.area, reverse=True):
-            if any(self._iou(item.bbox, existing.bbox) > 0.5 for existing in deduped):
-                continue
-            deduped.append(item)
+
+        # Prefer tighter boxes first (more accurate bbox for downstream matching).
+        for item in sorted(results, key=lambda r: r.area):
+            replaced = False
+            for index, existing in enumerate(deduped):
+                overlap = self._iou(item.bbox, existing.bbox)
+                containment = max(
+                    self._containment_ratio(item.bbox, existing.bbox),
+                    self._containment_ratio(existing.bbox, item.bbox),
+                )
+                if overlap > 0.45 or containment > 0.85:
+                    # Keep the tighter one to reduce oversized-box drift.
+                    if item.area < existing.area:
+                        deduped[index] = item
+                    replaced = True
+                    break
+            if not replaced:
+                deduped.append(item)
+
         return deduped
 
     def _ensure_odd_blur(self, gray: np.ndarray) -> np.ndarray:
@@ -179,6 +203,21 @@ class BoxDetector:
         area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
         union = area_a + area_b - inter
         return inter / union if union > 0 else 0.0
+
+    @staticmethod
+    def _containment_ratio(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+        """Return intersection area over area(a)."""
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+        iw = max(0, ix2 - ix1)
+        ih = max(0, iy2 - iy1)
+        inter = iw * ih
+        area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+        return inter / area_a if area_a > 0 else 0.0
 
     def draw_detections(
         self, image: np.ndarray, results: list[BoxDetectionResult]
