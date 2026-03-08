@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Camera, CameraRotate, Play, Stop, WarningCircle } from "@phosphor-icons/react";
+import { ArrowsIn, ArrowsOut, Camera, CameraRotate, Play, Stop, WarningCircle } from "@phosphor-icons/react";
 
 import { EmptyState } from "@/components/common/empty-state";
 import { PageHeader } from "@/components/common/page-header";
@@ -115,8 +115,10 @@ export default function LiveDetectionPage() {
   const [autoResolvedMode, setAutoResolvedMode] = useState<Exclude<PerformanceMode, "auto">>("balanced");
   const [showBoundingBoxes, setShowBoundingBoxes] = useState(true);
   const [showDecodeInfo, setShowDecodeInfo] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
+  const liveDisplayRef = useRef<HTMLDivElement | null>(null);
   const browserStreamRef = useRef<MediaStream | null>(null);
   const browserPreviewUrlRef = useRef<string | null>(null);
   const previewSessionRef = useRef(0);
@@ -194,6 +196,15 @@ export default function LiveDetectionPage() {
       stopBrowserStream();
       clearBrowserPreviewUrl();
     };
+  }, []);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === liveDisplayRef.current);
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
   }, []);
 
   useEffect(() => {
@@ -660,6 +671,21 @@ export default function LiveDetectionPage() {
 
   const liveOverlaySourceSize = overlaySourceSize
     ?? (videoNativeSize.width && videoNativeSize.height ? videoNativeSize : null);
+  const previewViewportClassName = isFullscreen ? "h-[calc(100dvh-10rem)] min-h-[28rem]" : undefined;
+
+  async function toggleFullscreen() {
+    const element = liveDisplayRef.current;
+    if (!element) {
+      return;
+    }
+
+    if (document.fullscreenElement === element) {
+      await document.exitFullscreen();
+      return;
+    }
+
+    await element.requestFullscreen();
+  }
 
   return (
     <div className="space-y-6">
@@ -828,7 +854,16 @@ export default function LiveDetectionPage() {
         </div>
 
         <div className="space-y-6">
-          <SectionCard title="鏡頭畫面" description="裝置鏡頭會直接顯示瀏覽器預覽；後端鏡頭則透過 API 取回最新影格。擷取後會顯示已存檔的辨識結果影像。">
+          <SectionCard
+            title="鏡頭畫面"
+            description="裝置鏡頭會直接顯示瀏覽器預覽；後端鏡頭則透過 API 取回最新影格。擷取後會顯示已存檔的辨識結果影像。"
+            action={
+              <Button size="sm" variant="outline" onClick={() => void toggleFullscreen()}>
+                {isFullscreen ? <ArrowsIn size={16} /> : <ArrowsOut size={16} />}
+                {isFullscreen ? "離開全螢幕" : "全螢幕"}
+              </Button>
+            }
+          >
             <div className="mb-4 flex flex-wrap gap-2">
               <Button
                 size="sm"
@@ -846,6 +881,7 @@ export default function LiveDetectionPage() {
                 {showDecodeInfo ? "隱藏 BID" : "顯示 BID"}
               </Button>
             </div>
+            <div ref={liveDisplayRef} className={isFullscreen ? "rounded-2xl bg-background p-4" : undefined}>
             {isPreviewing && selectedCamera?.sourceScope === "browser" ? (
               <div className="relative overflow-hidden rounded-3xl border bg-card/70 p-3 shadow-sm">
                 {isScanningLive ? (
@@ -859,7 +895,7 @@ export default function LiveDetectionPage() {
                     {lastScanInfo.count > 0 ? `找到 ${lastScanInfo.count} 個` : "未偵測到"} · {lastScanInfo.elapsedMs}ms
                   </div>
                 ) : null}
-                <div ref={videoContainerRef} className="relative h-[min(62vh,40rem)] min-h-80 overflow-hidden rounded-2xl bg-[linear-gradient(135deg,#f8fafc,#dbeafe)] dark:bg-[linear-gradient(135deg,#0f172a,#1e293b)]">
+                <div ref={videoContainerRef} className={`relative min-h-80 overflow-hidden rounded-2xl bg-[linear-gradient(135deg,#f8fafc,#dbeafe)] dark:bg-[linear-gradient(135deg,#0f172a,#1e293b)] ${previewViewportClassName ?? "h-[min(62vh,40rem)]"}`}>
                   <video
                     ref={videoRef}
                     className="relative z-0 h-full w-full object-contain"
@@ -896,9 +932,9 @@ export default function LiveDetectionPage() {
                               }}
                             >
                               {overlayLines.length > 0 ? (
-                                <span className="absolute -top-2 left-0 max-w-56 -translate-y-full rounded-md bg-background/95 px-2 py-1 text-[10px] font-medium shadow-sm">
+                                <span className="absolute -top-2 left-0 min-w-16 max-w-72 -translate-y-full truncate whitespace-nowrap rounded-full bg-background/95 px-2.5 py-1 text-[10px] font-medium shadow-sm">
                                   {overlayLines.map((line) => (
-                                    <span key={line} className="block break-all whitespace-normal leading-tight">
+                                    <span key={line} className="block truncate leading-tight">
                                       {line}
                                     </span>
                                   ))}
@@ -934,9 +970,11 @@ export default function LiveDetectionPage() {
                   sourceImageSize={overlaySourceSize}
                   showBoundingBoxes={showBoundingBoxes}
                   showDecodeInfo={showDecodeInfo}
+                  viewportClassName={previewViewportClassName}
                 />
               </div>
             )}
+            </div>
           </SectionCard>
 
           <SectionCard title="辨識結果列表" description="按下擷取後，當前影格的辨識結果會存入後端資料庫。">

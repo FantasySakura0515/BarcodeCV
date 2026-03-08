@@ -28,6 +28,7 @@ export function DetectionCanvas({
   onImageLoad,
   showBoundingBoxes = true,
   showDecodeInfo = false,
+  viewportClassName,
 }: {
   imageUrl: string | null;
   objects: DetectionObject[];
@@ -37,6 +38,7 @@ export function DetectionCanvas({
   onImageLoad?: () => void;
   showBoundingBoxes?: boolean;
   showDecodeInfo?: boolean;
+  viewportClassName?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerSize, setContainerSize] = useState<Size>({ width: 0, height: 0 });
@@ -80,7 +82,10 @@ export function DetectionCanvas({
 
   return (
     <div className="relative overflow-hidden rounded-xl border bg-card p-3 shadow-sm">
-      <div ref={containerRef} className="relative h-[min(62vh,40rem)] min-h-80 overflow-hidden rounded-lg bg-muted/40">
+      <div
+        ref={containerRef}
+        className={cn("relative h-[min(62vh,40rem)] min-h-80 overflow-hidden rounded-lg bg-muted/40", viewportClassName)}
+      >
         {imageUrl ? (
           <>
             <img
@@ -119,9 +124,9 @@ export function DetectionCanvas({
                       }}
                     >
                       {overlayLines.length > 0 ? (
-                        <span className="absolute -top-2 left-0 max-w-56 -translate-y-full rounded-md bg-background/95 px-2 py-1 text-[10px] font-medium shadow-sm">
+                        <span className="absolute -top-2 left-0 min-w-16 max-w-72 -translate-y-full truncate whitespace-nowrap rounded-full bg-background/95 px-2.5 py-1 text-[10px] font-medium shadow-sm">
                           {overlayLines.map((line) => (
-                            <span key={line} className="block break-all whitespace-normal leading-tight">
+                            <span key={line} className="block truncate leading-tight">
                               {line}
                             </span>
                           ))}
