@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { DownloadSimple, Play, Trash } from "@phosphor-icons/react";
 import { motion } from "framer-motion";
 
@@ -15,6 +16,8 @@ import { useDetectionStore } from "@/stores/use-detection-store";
 export default function DetectionPage() {
   const { imageFile, imageUrl, rid, objects, selectedBid, isLoading, error, setImageFile, setSelectedBid, clear, submitDetection } =
     useDetectionStore();
+  const [showBoundingBoxes, setShowBoundingBoxes] = useState(true);
+  const [showDecodeInfo, setShowDecodeInfo] = useState(false);
 
   const selectedObject = objects.find((item) => item.bid === selectedBid) ?? null;
 
@@ -58,7 +61,7 @@ export default function DetectionPage() {
                   <div className="space-y-2">
                     <p className="break-all font-mono text-sm font-semibold">{selectedObject.bid}</p>
                     <p className="break-all text-sm text-muted-foreground">條碼：{selectedObject.barcodeValue ?? "未偵測到"}</p>
-                    <p className="break-words text-sm text-muted-foreground">OCR：{selectedObject.ocrText ?? "無"}</p>
+                    <p className="wrap-break-word text-sm text-muted-foreground">OCR：{selectedObject.ocrText ?? "無"}</p>
                   </div>
                 ) : (
                   <p className="text-sm text-muted-foreground">尚未選取物件。</p>
@@ -78,7 +81,38 @@ export default function DetectionPage() {
 
         <div className="space-y-6">
           <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-            <DetectionCanvas imageUrl={imageUrl} objects={objects} selectedBid={selectedBid} onSelect={setSelectedBid} />
+            <SectionCard
+              title="辨識影像"
+              description="可切換是否顯示物件框與解碼資訊，方便比對原圖。"
+              action={
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant={showBoundingBoxes ? "default" : "outline"}
+                    onClick={() => setShowBoundingBoxes((current) => !current)}
+                  >
+                    {showBoundingBoxes ? "隱藏物件框" : "顯示物件框"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={showDecodeInfo ? "default" : "outline"}
+                    onClick={() => setShowDecodeInfo((current) => !current)}
+                    disabled={!showBoundingBoxes}
+                  >
+                    {showDecodeInfo ? "隱藏 BID" : "顯示 BID"}
+                  </Button>
+                </div>
+              }
+            >
+              <DetectionCanvas
+                imageUrl={imageUrl}
+                objects={objects}
+                selectedBid={selectedBid}
+                onSelect={setSelectedBid}
+                showBoundingBoxes={showBoundingBoxes}
+                showDecodeInfo={showDecodeInfo}
+              />
+            </SectionCard>
           </motion.div>
 
           <SectionCard

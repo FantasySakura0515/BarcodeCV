@@ -11,6 +11,14 @@ interface Size {
   height: number;
 }
 
+function buildOverlayLines(item: DetectionObject, showDecodeInfo: boolean) {
+  if (!showDecodeInfo) {
+    return [];
+  }
+
+  return [item.bid];
+}
+
 export function DetectionCanvas({
   imageUrl,
   objects,
@@ -18,6 +26,8 @@ export function DetectionCanvas({
   onSelect,
   sourceImageSize,
   onImageLoad,
+  showBoundingBoxes = true,
+  showDecodeInfo = false,
 }: {
   imageUrl: string | null;
   objects: DetectionObject[];
@@ -25,6 +35,8 @@ export function DetectionCanvas({
   onSelect?: (bid: string) => void;
   sourceImageSize?: ImageSize | null;
   onImageLoad?: () => void;
+  showBoundingBoxes?: boolean;
+  showDecodeInfo?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerSize, setContainerSize] = useState<Size>({ width: 0, height: 0 });
@@ -81,11 +93,12 @@ export function DetectionCanvas({
               }}
             />
 
-            {frame && overlaySourceSize
+            {showBoundingBoxes && frame && overlaySourceSize
               ? objects.map((item) => {
                   const width = Math.max(item.bbox.x2 - item.bbox.x1, 12);
                   const height = Math.max(item.bbox.y2 - item.bbox.y1, 12);
                   const active = item.bid === selectedBid;
+                  const overlayLines = buildOverlayLines(item, showDecodeInfo);
 
                   return (
                     <motion.button
@@ -105,9 +118,15 @@ export function DetectionCanvas({
                         height: (height / overlaySourceSize.height) * frame.height,
                       }}
                     >
-                      <span className="absolute -top-7 left-0 max-w-40 truncate rounded bg-background px-2 py-1 text-[10px] font-medium shadow-sm">
-                        {item.bid}
-                      </span>
+                      {overlayLines.length > 0 ? (
+                        <span className="absolute -top-2 left-0 max-w-56 -translate-y-full rounded-md bg-background/95 px-2 py-1 text-[10px] font-medium shadow-sm">
+                          {overlayLines.map((line) => (
+                            <span key={line} className="block break-all whitespace-normal leading-tight">
+                              {line}
+                            </span>
+                          ))}
+                        </span>
+                      ) : null}
                     </motion.button>
                   );
                 })

@@ -84,6 +84,14 @@ function mergeStableObjects(
   return [...byValue.values()].map((obj) => ({ ...obj, bid: obj.barcodeValue! }));
 }
 
+function buildOverlayLines(item: DetectionObject, showDecodeInfo: boolean) {
+  if (!showDecodeInfo) {
+    return [];
+  }
+
+  return [item.bid];
+}
+
 export default function LiveDetectionPage() {
   const [cameras, setCameras] = useState<LiveCameraOption[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<string>("");
@@ -104,10 +112,14 @@ export default function LiveDetectionPage() {
   const [overlaySourceSize, setOverlaySourceSize] = useState<ImageSize | null>(null);
   const [videoNativeSize, setVideoNativeSize] = useState<SurfaceSize>({ width: 0, height: 0 });
   const [videoContainerSize, setVideoContainerSize] = useState<SurfaceSize>({ width: 0, height: 0 });
+  const [autoResolvedMode, setAutoResolvedMode] = useState<Exclude<PerformanceMode, "auto">>("balanced");
+  const [showBoundingBoxes, setShowBoundingBoxes] = useState(true);
+  const [showDecodeInfo, setShowDecodeInfo] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
   const browserStreamRef = useRef<MediaStream | null>(null);
   const browserPreviewUrlRef = useRef<string | null>(null);
+  const previewSessionRef = useRef(0);
 
   const selectedCamera = useMemo(
     () => cameras.find((item) => item.id === selectedCameraId) ?? null,
@@ -115,24 +127,20 @@ export default function LiveDetectionPage() {
   );
 
   /**
-   * When mode is "auto", resolve once on mount to "low" or "balanced" based on
-   * hardware concurrency and network conditions.  Hardware doesn't change at
-   * runtime so there's no need to recompute.
+   * Keep SSR and the first client render deterministic. Resolve the real
+   * automatic mode only after mount, based on client hardware / network.
    */
-  const autoResolvedMode = useMemo<Exclude<PerformanceMode, "auto">>(() => {
-    const connection = typeof navigator !== "undefined"
-      ? (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection
-      : undefined;
+  useEffect(() => {
+    const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
 
     const isLowEnd =
-      (typeof navigator !== "undefined" && navigator.hardwareConcurrency > 0 && navigator.hardwareConcurrency <= 4)
+      (navigator.hardwareConcurrency > 0 && navigator.hardwareConcurrency <= 4)
       || connection?.saveData
       || connection?.effectiveType === "2g"
       || connection?.effectiveType === "slow-2g";
 
-    return isLowEnd ? "low" : "balanced";
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally computed once
+    setAutoResolvedMode(isLowEnd ? "low" : "balanced");
+  }, []);
 
   const resolvedMode = performanceMode === "auto" ? autoResolvedMode : performanceMode;
 
@@ -252,20 +260,21 @@ export default function LiveDetectionPage() {
       return;
     }
 
+    const sessionId = ++previewSessionRef.current;
     let cancelled = false;
 
     const loop = async () => {
       while (!cancelled) {
         const cycleStart = Date.now();
         try {
-          if (!cancelled) setIsScanningLive(true);
+          if (!cancelled && previewSessionRef.current === sessionId) setIsScanningLive(true);
           if (selectedCamera.sourceScope === "backend") {
             const response = await fetchLiveCameraDetection(
               selectedCameraId,
               "opencv",
               performanceTargetSize?.detect.width ?? scaleDimension(selectedCamera?.width ?? 0, performanceProfile.detectScale),
             );
-            if (!cancelled) {
+            if (!cancelled && previewSessionRef.current === sessionId) {
               const elapsedMs = Date.now() - cycleStart;
               syncCameraActualResolution(selectedCameraId, response.sourceImage);
               setObjects(response.objects);
@@ -277,7 +286,7 @@ export default function LiveDetectionPage() {
             }
           } else {
             const response = await previewFromBrowserCamera();
-            if (!cancelled) {
+            if (!cancelled && previewSessionRef.current === sessionId) {
               const elapsedMs = Date.now() - cycleStart;
               setObjects(response.objects);
               setStableObjects((prev) => mergeStableObjects(prev, response.objects));
@@ -288,12 +297,12 @@ export default function LiveDetectionPage() {
             }
           }
         } catch (err) {
-          if (!cancelled) {
+          if (!cancelled && previewSessionRef.current === sessionId) {
             const message = err instanceof Error ? err.message : "即時辨識失敗";
             setError(message);
           }
         } finally {
-          if (!cancelled) setIsScanningLive(false);
+          if (!cancelled && previewSessionRef.current === sessionId) setIsScanningLive(false);
         }
         // Wait only the remaining time so that minCycleMs is the TOTAL period,
         // not an extra delay added after detection. Minimum 50ms to yield the
@@ -308,6 +317,9 @@ export default function LiveDetectionPage() {
 
     return () => {
       cancelled = true;
+      if (previewSessionRef.current === sessionId) {
+        previewSessionRef.current += 1;
+      }
       setIsScanningLive(false);
     };
   }, [isPreviewing, performanceProfile.minCycleMs, performanceProfile.detectScale, performanceTargetSize, selectedCamera, selectedCameraId]);
@@ -327,7 +339,20 @@ export default function LiveDetectionPage() {
   const displayObjects = isPreviewing ? stableObjects : objects;
   const selectedObject = displayObjects.find((item) => item.bid === selectedBid) ?? null;
 
+  function invalidatePreviewSession() {
+    previewSessionRef.current += 1;
+  }
+
+  function resetLiveOverlayState() {
+    setIsScanningLive(false);
+    setLastScanInfo(null);
+    setStableObjects([]);
+    setOverlaySourceSize(null);
+  }
+
   function handleCameraChange(cameraId: string) {
+    invalidatePreviewSession();
+    stopBrowserStream();
     setSelectedCameraId(cameraId);
     setIsPreviewing(false);
     setObjects([]);
@@ -426,11 +451,11 @@ export default function LiveDetectionPage() {
       return;
     }
 
+    invalidatePreviewSession();
     setObjects([]);
-    setStableObjects([]);
+    resetLiveOverlayState();
     setSelectedBid(null);
     setRid(null);
-    setOverlaySourceSize(null);
     setError(null);
 
     if (selectedCamera.sourceScope === "browser") {
@@ -447,12 +472,10 @@ export default function LiveDetectionPage() {
   }
 
   function stopPreview() {
+    invalidatePreviewSession();
     setIsPreviewing(false);
-    setIsScanningLive(false);
-    setLastScanInfo(null);
-    setStableObjects([]);
+    resetLiveOverlayState();
     stopBrowserStream();
-    setOverlaySourceSize(null);
   }
 
   async function captureCurrentFrame() {
@@ -464,21 +487,38 @@ export default function LiveDetectionPage() {
     setIsCapturing(true);
     setError(null);
     try {
-      const response = selectedCamera.sourceScope === "browser"
-        ? await captureFromBrowserCamera(selectedCamera)
-        : await captureLiveDetection(selectedCameraId);
+      invalidatePreviewSession();
 
-      setIsPreviewing(false);
-      stopBrowserStream();
-      if (selectedCamera.sourceScope === "backend") {
+      if (selectedCamera.sourceScope === "browser") {
+        const snapshot = await captureBrowserSnapshot(selectedCamera, 0.88, Math.min(videoRef.current?.videoWidth || 1280, 1280));
+        updateBrowserPreviewUrl(snapshot.blob);
+        setPreviewUrl(browserPreviewUrlRef.current);
+        setIsPreviewing(false);
+        resetLiveOverlayState();
+        stopBrowserStream();
+
+        const response = await runDetection(snapshot.file);
+        setRid(response.rid);
+        setObjects(response.objects);
+        setOverlaySourceSize(response.sourceImage ?? snapshot.sourceImage);
+        setSelectedBid(response.objects[0]?.bid ?? null);
+
+        if (response.imagePath) {
+          clearBrowserPreviewUrl();
+          setPreviewUrl(resolveApiAssetUrl(response.imagePath) ?? null);
+        }
+      } else {
+        setIsPreviewing(false);
+        resetLiveOverlayState();
+        const response = await captureLiveDetection(selectedCameraId);
         syncCameraActualResolution(selectedCameraId, response.sourceImage);
+        setRid(response.rid);
+        setObjects(response.objects);
+        setOverlaySourceSize(response.sourceImage ?? null);
+        setSelectedBid(response.objects[0]?.bid ?? null);
+        clearBrowserPreviewUrl();
+        setPreviewUrl(resolveApiAssetUrl(response.imagePath) ?? null);
       }
-      setRid(response.rid);
-      setObjects(response.objects);
-      setOverlaySourceSize(response.sourceImage ?? null);
-      setSelectedBid(response.objects[0]?.bid ?? null);
-      clearBrowserPreviewUrl();
-      setPreviewUrl(resolveApiAssetUrl(response.imagePath) ?? null);
     } catch (err) {
       const message = err instanceof Error ? err.message : "擷取並辨識失敗";
       setError(message);
@@ -546,7 +586,7 @@ export default function LiveDetectionPage() {
     }
   }
 
-  async function captureFromBrowserCamera(camera: LiveCameraOption) {
+  async function captureBrowserSnapshot(camera: LiveCameraOption, quality: number, maxWidth: number) {
     const video = videoRef.current;
     if (!video || !browserStreamRef.current) {
       throw new Error("請先開始裝置鏡頭預覽");
@@ -555,7 +595,7 @@ export default function LiveDetectionPage() {
     const width = video.videoWidth || 1280;
     const height = video.videoHeight || 720;
     const canvas = document.createElement("canvas");
-    const targetWidth = Math.min(width, 1280);
+    const targetWidth = Math.min(width, maxWidth);
     const targetHeight = Math.max(1, Math.round((height / width) * targetWidth));
     canvas.width = targetWidth;
     canvas.height = targetHeight;
@@ -568,7 +608,7 @@ export default function LiveDetectionPage() {
     context.drawImage(video, 0, 0, targetWidth, targetHeight);
 
     const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob(resolve, "image/jpeg", 0.88);
+      canvas.toBlob(resolve, "image/jpeg", quality);
     });
 
     if (!blob) {
@@ -576,38 +616,27 @@ export default function LiveDetectionPage() {
     }
 
     const file = new File([blob], `${camera.id}-${Date.now()}.jpg`, { type: "image/jpeg" });
-    return runDetection(file);
+    return {
+      blob,
+      file,
+      sourceImage: {
+        width: targetWidth,
+        height: targetHeight,
+      },
+    };
   }
 
   async function previewFromBrowserCamera() {
-    const video = videoRef.current;
-    if (!video || !browserStreamRef.current) {
-      throw new Error("請先開始裝置鏡頭預覽");
+    if (!selectedCamera) {
+      throw new Error("請先選擇可用鏡頭");
     }
 
-    const width = video.videoWidth || 1280;
-    const height = video.videoHeight || 720;
-
-    const canvas = document.createElement("canvas");
-    const targetWidth = scaleDimension(width, performanceProfile.detectScale);
-    const targetHeight = Math.max(1, Math.round((height / width) * targetWidth));
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
-    const context = canvas.getContext("2d");
-    if (!context) {
-      throw new Error("無法建立即時辨識畫布");
-    }
-
-    context.drawImage(video, 0, 0, targetWidth, targetHeight);
-    const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob(resolve, "image/jpeg", performanceProfile.jpegQuality);
-    });
-
-    if (!blob) {
-      throw new Error("無法擷取即時辨識畫面");
-    }
-    const file = new File([blob], `live-preview-${Date.now()}.jpg`, { type: "image/jpeg" });
-    return previewDetection(file);
+    const snapshot = await captureBrowserSnapshot(
+      selectedCamera,
+      performanceProfile.jpegQuality,
+      scaleDimension(videoRef.current?.videoWidth || 1280, performanceProfile.detectScale),
+    );
+    return previewDetection(snapshot.file);
   }
 
   const browserFrame = useMemo(() => {
@@ -800,6 +829,23 @@ export default function LiveDetectionPage() {
 
         <div className="space-y-6">
           <SectionCard title="鏡頭畫面" description="裝置鏡頭會直接顯示瀏覽器預覽；後端鏡頭則透過 API 取回最新影格。擷取後會顯示已存檔的辨識結果影像。">
+            <div className="mb-4 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant={showBoundingBoxes ? "default" : "outline"}
+                onClick={() => setShowBoundingBoxes((current) => !current)}
+              >
+                {showBoundingBoxes ? "隱藏物件框" : "顯示物件框"}
+              </Button>
+              <Button
+                size="sm"
+                variant={showDecodeInfo ? "default" : "outline"}
+                onClick={() => setShowDecodeInfo((current) => !current)}
+                disabled={!showBoundingBoxes}
+              >
+                {showDecodeInfo ? "隱藏 BID" : "顯示 BID"}
+              </Button>
+            </div>
             {isPreviewing && selectedCamera?.sourceScope === "browser" ? (
               <div className="relative overflow-hidden rounded-3xl border bg-card/70 p-3 shadow-sm">
                 {isScanningLive ? (
@@ -829,11 +875,12 @@ export default function LiveDetectionPage() {
                   />
 
                   <div className="pointer-events-none absolute inset-0 z-20">
-                    {browserFrame && liveOverlaySourceSize
+                    {showBoundingBoxes && browserFrame && liveOverlaySourceSize
                       ? objects.map((item) => {
                           const bw = Math.max(item.bbox.x2 - item.bbox.x1, 12);
                           const bh = Math.max(item.bbox.y2 - item.bbox.y1, 12);
                           const active = item.bid === selectedBid;
+                          const overlayLines = buildOverlayLines(item, showDecodeInfo);
 
                           return (
                             <button
@@ -848,9 +895,15 @@ export default function LiveDetectionPage() {
                                 height: (bh / liveOverlaySourceSize.height) * browserFrame.height,
                               }}
                             >
-                              <span className="absolute -top-7 left-0 max-w-40 truncate rounded-full bg-background/95 px-2 py-1 text-[10px] font-medium shadow-sm">
-                                {item.bid}
-                              </span>
+                              {overlayLines.length > 0 ? (
+                                <span className="absolute -top-2 left-0 max-w-56 -translate-y-full rounded-md bg-background/95 px-2 py-1 text-[10px] font-medium shadow-sm">
+                                  {overlayLines.map((line) => (
+                                    <span key={line} className="block break-all whitespace-normal leading-tight">
+                                      {line}
+                                    </span>
+                                  ))}
+                                </span>
+                              ) : null}
                             </button>
                           );
                         })
@@ -879,6 +932,8 @@ export default function LiveDetectionPage() {
                   selectedBid={selectedBid}
                   onSelect={setSelectedBid}
                   sourceImageSize={overlaySourceSize}
+                  showBoundingBoxes={showBoundingBoxes}
+                  showDecodeInfo={showDecodeInfo}
                 />
               </div>
             )}
