@@ -58,7 +58,7 @@ export const useDetectionStore = create<DetectionState>((set, get) => ({
   submitDetection: async () => {
     const { imageFile } = get();
     if (!imageFile) {
-      set({ error: "Please select an image file first." });
+      set({ error: "請先選擇影像檔案。" });
       return;
     }
 
@@ -72,18 +72,18 @@ export const useDetectionStore = create<DetectionState>((set, get) => ({
         isLoading: false,
       });
     } catch (error) {
-      let message = "Detection request failed. Please try again.";
+      let message = "辨識請求失敗，請稍後再試。";
 
       if (axios.isAxiosError(error)) {
         if (error.code === "ECONNABORTED") {
-          message = "Detection request timed out. Try again or use a smaller image.";
+          message = "辨識請求逾時，請重試或改用較小影像。";
         } else if (error.code === "ERR_CANCELED") {
-          message = "Detection request was canceled. Refresh and try again.";
+          message = "辨識請求已取消，請重新整理後再試。";
         } else {
           const detail = (error.response?.data as { detail?: string; message?: string } | undefined)?.detail
             ?? (error.response?.data as { detail?: string; message?: string } | undefined)?.message;
           if (detail) {
-            message = `Detection failed: ${detail}`;
+            message = `辨識失敗：${detail}`;
           }
         }
       }

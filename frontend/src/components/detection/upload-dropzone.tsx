@@ -19,8 +19,8 @@ export function UploadDropzone({
           <UploadSimple size={22} />
         </div>
         <div>
-          <p className="text-base font-medium">Upload an image file</p>
-          <p className="mt-1 text-sm text-muted-foreground">Supports a single image. The file will be sent to backend detection service.</p>
+          <p className="text-base font-medium">上傳影像檔案</p>
+          <p className="mt-1 text-sm text-muted-foreground">僅支援單張影像，檔案將送往後端辨識服務。</p>
         </div>
         <label>
           <input
@@ -30,7 +30,7 @@ export function UploadDropzone({
             onChange={(event) => onFileSelect(event.target.files?.[0] ?? null)}
           />
           <Button asChild>
-            <span>Select file</span>
+            <span>選擇檔案</span>
           </Button>
         </label>
         {fileName ? (

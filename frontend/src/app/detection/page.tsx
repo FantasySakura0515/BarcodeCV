@@ -21,18 +21,18 @@ export default function DetectionPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        badge="Image workflow"
-        title="Image Detection"
-        description="Upload one image, run backend detection, and review object-level barcode/OCR results."
+        badge="影像流程"
+        title="影像辨識"
+        description="上傳單張影像，執行後端辨識，並檢視物件層級的條碼與 OCR 結果。"
         action={
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => submitDetection()} disabled={!imageFile || isLoading}>
               <Play size={16} />
-              {isLoading ? "Running..." : "Run detection"}
+              {isLoading ? "執行中..." : "執行辨識"}
             </Button>
             <Button variant="outline" onClick={clear}>
               <Trash size={16} />
-              Clear
+              清除
             </Button>
           </div>
         }
@@ -42,33 +42,33 @@ export default function DetectionPage() {
         <div className="space-y-6">
           <UploadDropzone onFileSelect={setImageFile} fileName={imageFile?.name} />
 
-          <SectionCard title="Run summary" description="Current run status and selected object information.">
+          <SectionCard title="批次摘要" description="目前批次狀態與所選物件資訊。">
             <div className="space-y-3 text-sm">
               <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2">
-                <span className="text-muted-foreground">Run ID (RID)</span>
-                <span className="font-medium">{rid ?? "Not started"}</span>
+                <span className="text-muted-foreground">批次 ID（RID）</span>
+                <span className="font-medium">{rid ?? "尚未開始"}</span>
               </div>
               <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2">
-                <span className="text-muted-foreground">Detected objects</span>
+                <span className="text-muted-foreground">偵測物件數</span>
                 <span className="font-medium">{objects.length}</span>
               </div>
               <div className="rounded-xl border bg-background p-4">
-                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Selected object</p>
+                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">目前選取物件</p>
                 {selectedObject ? (
                   <div className="space-y-2">
                     <p className="break-all font-mono text-sm font-semibold">{selectedObject.bid}</p>
-                    <p className="break-all text-sm text-muted-foreground">Barcode: {selectedObject.barcodeValue ?? "Not detected"}</p>
-                    <p className="break-words text-sm text-muted-foreground">OCR: {selectedObject.ocrText ?? "None"}</p>
+                    <p className="break-all text-sm text-muted-foreground">條碼：{selectedObject.barcodeValue ?? "未偵測到"}</p>
+                    <p className="break-words text-sm text-muted-foreground">OCR：{selectedObject.ocrText ?? "無"}</p>
                   </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground">No object selected.</p>
+                  <p className="text-sm text-muted-foreground">尚未選取物件。</p>
                 )}
               </div>
               {error ? (
                 <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3">
                   <p className="text-sm text-destructive">{error}</p>
                   <Button size="sm" variant="outline" className="mt-2" onClick={() => submitDetection()} disabled={!imageFile || isLoading}>
-                    Retry
+                    重試
                   </Button>
                 </div>
               ) : null}
@@ -82,19 +82,19 @@ export default function DetectionPage() {
           </motion.div>
 
           <SectionCard
-            title="Detection results"
-            description="Object list and box selection are synchronized."
+            title="辨識結果"
+            description="物件清單與方框選取會保持同步。"
             action={
               <Button variant="outline" disabled={!objects.length}>
                 <DownloadSimple size={16} />
-                Export
+                匯出
               </Button>
             }
           >
             {objects.length ? (
               <ObjectResultTable items={objects} selectedBid={selectedBid} onSelect={setSelectedBid} />
             ) : (
-              <EmptyState title="No detection results" description="Upload an image and run detection to view object-level results." />
+              <EmptyState title="尚無辨識結果" description="請先上傳影像並執行辨識，即可查看物件層級結果。" />
             )}
           </SectionCard>
         </div>

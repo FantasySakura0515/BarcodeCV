@@ -21,19 +21,19 @@ export function ObjectResultTable({
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Object ID (BID)</TableHead>
-          <TableHead>Barcode</TableHead>
-          <TableHead>OCR Text</TableHead>
-          <TableHead>Confidence</TableHead>
-          <TableHead>Model</TableHead>
-          <TableHead className="text-right">Details</TableHead>
+          <TableHead>物件 ID（BID）</TableHead>
+          <TableHead>條碼</TableHead>
+          <TableHead>OCR 文字</TableHead>
+          <TableHead>信心分數</TableHead>
+          <TableHead>模型</TableHead>
+          <TableHead className="text-right">詳細資料</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {items.length === 0 ? (
           <TableRow>
             <TableCell colSpan={6} className="h-20 text-center text-sm text-muted-foreground">
-              No objects available.
+              目前沒有可用物件。
             </TableCell>
           </TableRow>
         ) : null}
@@ -52,7 +52,7 @@ export function ObjectResultTable({
                   <p className="text-xs text-muted-foreground">{item.barcodeType}</p>
                 </div>
               ) : (
-                <Badge variant="outline">Not detected</Badge>
+                <Badge variant="outline">未偵測到</Badge>
               )}
             </TableCell>
             <TableCell className="max-w-72 break-words whitespace-normal text-muted-foreground">{item.ocrText ?? "-"}</TableCell>
@@ -62,7 +62,7 @@ export function ObjectResultTable({
             </TableCell>
             <TableCell className="text-right">
               <Link className="text-sm font-medium text-primary" href={`/objects/${item.bid}`}>
-                View
+                檢視
               </Link>
             </TableCell>
           </TableRow>

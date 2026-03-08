@@ -635,7 +635,7 @@ export default function LiveDetectionPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        badge="Camera / Device Capture"
+        badge="鏡頭／裝置擷取"
         title="即時辨識"
         description="支援後端鏡頭與目前裝置本身鏡頭。啟動預覽後按下擷取，會將當前畫面送到後端辨識並存入批次紀錄。"
         action={
@@ -724,7 +724,7 @@ export default function LiveDetectionPage() {
                     </Badge>
                   </div>
                   <p className="text-muted-foreground">範圍：{selectedCamera.sourceScope === "browser" ? "目前設備鏡頭" : "後端主機鏡頭"}</p>
-                  <p className="text-muted-foreground">來源：{selectedCamera.sourceType} / index {selectedCamera.cameraNum}</p>
+                  <p className="text-muted-foreground">來源：{selectedCamera.sourceType} / 編號 {selectedCamera.cameraNum}</p>
                   <p className="text-muted-foreground">解析度：{selectedCamera.width} × {selectedCamera.height}</p>
                   <p className="text-muted-foreground">
                     模式：
@@ -790,7 +790,7 @@ export default function LiveDetectionPage() {
                     <span>{error}</span>
                   </div>
                   <Button size="sm" variant="outline" className="mt-2" onClick={() => void refreshCameras()}>
-                    Retry camera scan
+重新掃描鏡頭
                   </Button>
                 </div>
               ) : null}

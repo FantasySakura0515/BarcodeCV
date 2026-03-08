@@ -73,7 +73,7 @@ export function DetectionCanvas({
           <>
             <img
               src={imageUrl}
-              alt="Detection preview"
+              alt="辨識預覽"
               className="absolute inset-0 h-full w-full object-contain"
               onLoad={(event) => {
                 setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight });
@@ -114,7 +114,7 @@ export function DetectionCanvas({
               : null}
           </>
         ) : (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No image loaded. Upload or capture an image to begin.</div>
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">尚未載入影像。請先上傳或擷取影像後開始。</div>
         )}
       </div>
     </div>
