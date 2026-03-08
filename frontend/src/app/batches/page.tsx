@@ -17,10 +17,10 @@ export default async function BatchesPage() {
   } catch {
     return (
       <div className="space-y-6">
-        <PageHeader badge="Record review" title="Batch Records" description="Review historical detection runs and outcomes." />
+        <PageHeader badge="紀錄檢視" title="批次紀錄" description="檢視歷史辨識批次與結果。" />
         <EmptyState
-          title="Unable to load batch records"
-          description="The API request failed. Check backend availability and refresh to retry."
+          title="無法載入批次紀錄"
+          description="API 請求失敗。請檢查後端可用性並重新整理後再試。"
         />
       </div>
     );
@@ -29,28 +29,28 @@ export default async function BatchesPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        badge="Record review"
-        title="Batch Records"
-        description="Track historical runs, barcode/OCR outcomes, and model attribution."
+        badge="紀錄檢視"
+        title="批次紀錄"
+        description="追蹤歷史批次、條碼與 OCR 結果，以及模型來源。"
       />
 
-      <SectionCard title="Batch list" description="Detection runs returned by backend API.">
+      <SectionCard title="批次清單" description="後端 API 回傳的辨識批次。">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Run ID (RID)</TableHead>
-              <TableHead>Objects</TableHead>
-              <TableHead>Barcode success</TableHead>
-              <TableHead>OCR success</TableHead>
-              <TableHead>Model</TableHead>
-              <TableHead>Created</TableHead>
+              <TableHead>批次 ID（RID）</TableHead>
+              <TableHead>物件數</TableHead>
+              <TableHead>條碼成功數</TableHead>
+              <TableHead>OCR 成功數</TableHead>
+              <TableHead>模型</TableHead>
+              <TableHead>建立時間</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {batches.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="h-20 text-center text-sm text-muted-foreground">
-                  No batch records available.
+                  目前沒有批次紀錄。
                 </TableCell>
               </TableRow>
             ) : null}

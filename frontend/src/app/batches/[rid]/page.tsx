@@ -20,28 +20,28 @@ export default async function BatchDetailPage({ params }: { params: Promise<{ ri
 
   return (
     <div className="space-y-6">
-      <PageHeader badge="Batch detail" title={batch.rid} description="Review object-level results and bounding boxes for this run." />
+      <PageHeader badge="批次詳情" title={batch.rid} description="檢視本次批次的物件層級結果與邊界框。" />
 
       <section className="grid gap-6 xl:grid-cols-[1.3fr_1fr]">
-        <SectionCard title="Image preview" description="Bounding boxes rendered from detection results.">
+        <SectionCard title="影像預覽" description="由辨識結果繪製邊界框。">
           <DetectionCanvas imageUrl={previewImageUrl} objects={batch.objects} selectedBid={batch.objects[0]?.bid ?? null} />
         </SectionCard>
 
-        <SectionCard title="Run summary" description="Barcode/OCR output summary and model attribution.">
+        <SectionCard title="批次摘要" description="條碼與 OCR 輸出摘要及模型來源。">
           <div className="space-y-3 text-sm">
-            <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2"><span>Run ID (RID)</span><span className="font-medium">{batch.rid}</span></div>
-            <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2"><span>Objects</span><span className="font-medium">{batch.objectCount}</span></div>
-            <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2"><span>Barcode success</span><span className="font-medium">{batch.barcodeSuccessCount}</span></div>
-            <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2"><span>Model</span><ModelBadge model={batch.model} /></div>
+            <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2"><span>批次 ID（RID）</span><span className="font-medium">{batch.rid}</span></div>
+            <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2"><span>物件數</span><span className="font-medium">{batch.objectCount}</span></div>
+            <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2"><span>條碼成功數</span><span className="font-medium">{batch.barcodeSuccessCount}</span></div>
+            <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2"><span>模型</span><ModelBadge model={batch.model} /></div>
           </div>
         </SectionCard>
       </section>
 
-      <SectionCard title="Detected objects" description="All objects detected in this run.">
+      <SectionCard title="已偵測物件" description="此批次中偵測到的所有物件。">
         {batch.objects.length ? (
           <ObjectResultTable items={batch.objects} selectedBid={batch.objects[0]?.bid ?? null} />
         ) : (
-          <EmptyState title="No objects in this run" description="This run does not contain object-level results." />
+          <EmptyState title="此批次沒有物件" description="此批次不包含物件層級結果。" />
         )}
       </SectionCard>
     </div>

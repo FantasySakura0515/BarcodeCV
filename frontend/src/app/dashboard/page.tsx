@@ -21,13 +21,13 @@ export default async function DashboardPage() {
     return (
       <div className="space-y-6">
         <PageHeader
-          badge="Operations overview"
-          title="Dashboard"
-          description="System summary of detection activity, trends, and model usage."
+          badge="營運總覽"
+          title="儀表板"
+          description="檢視辨識活動、趨勢與模型使用情況的系統摘要。"
         />
         <EmptyState
-          title="Unable to load dashboard data"
-          description="The API request failed. Verify backend connectivity and refresh this page to retry."
+          title="無法載入儀表板資料"
+          description="API 請求失敗。請確認後端連線狀態後重新整理此頁再試。"
         />
       </div>
     );
@@ -36,45 +36,45 @@ export default async function DashboardPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        badge="Operations overview"
-        title="Dashboard"
-        description="Monitor detection throughput, success rates, and active model configuration."
+        badge="營運總覽"
+        title="儀表板"
+        description="監控辨識吞吐量、成功率與目前啟用的模型設定。"
         action={
           <div className="flex flex-wrap gap-2">
             <Button asChild>
-              <Link href="/detection">Run image detection</Link>
+              <Link href="/detection">執行影像辨識</Link>
             </Button>
             <Button asChild variant="outline">
-              <Link href="/live-detection">Open live detection</Link>
+              <Link href="/live-detection">開啟即時辨識</Link>
             </Button>
           </div>
         }
       />
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Total detection runs" value={String(statsSummary.totalRounds)} hint="All recorded runs" />
-        <StatCard label="Total objects" value={String(statsSummary.totalObjects)} hint="All detected objects" />
-        <StatCard label="Barcode read rate" value={`${statsSummary.barcodeSuccessRate}%`} hint="Recent average" />
-        <StatCard label="OCR success rate" value={`${statsSummary.ocrSuccessRate}%`} hint="Overall OCR performance" />
+        <StatCard label="累計辨識批次" value={String(statsSummary.totalRounds)} hint="所有已記錄批次" />
+        <StatCard label="累計物件數" value={String(statsSummary.totalObjects)} hint="所有已偵測物件" />
+        <StatCard label="條碼讀取率" value={`${statsSummary.barcodeSuccessRate}%`} hint="近期平均" />
+        <StatCard label="OCR 成功率" value={`${statsSummary.ocrSuccessRate}%`} hint="整體 OCR 表現" />
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
-        <SectionCard title="Recent runs" description="Latest detection runs and summaries.">
+        <SectionCard title="近期批次" description="最新辨識批次與摘要。">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Run ID (RID)</TableHead>
-                <TableHead>Objects</TableHead>
-                <TableHead>Barcode success</TableHead>
-                <TableHead>Model</TableHead>
-                <TableHead>Created</TableHead>
+                <TableHead>批次 ID（RID）</TableHead>
+                <TableHead>物件數</TableHead>
+                <TableHead>條碼成功數</TableHead>
+                <TableHead>模型</TableHead>
+                <TableHead>建立時間</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {statsSummary.recentRounds.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={5} className="h-20 text-center text-sm text-muted-foreground">
-                    No runs recorded yet.
+                    尚無批次紀錄。
                   </TableCell>
                 </TableRow>
               ) : null}
@@ -100,31 +100,31 @@ export default async function DashboardPage() {
         </SectionCard>
 
         <div className="space-y-6">
-          <SectionCard title="Active model" description="Currently active preprocessing and recognition configuration.">
+          <SectionCard title="啟用模型" description="目前啟用的前處理與辨識設定。">
             <div className="space-y-3">
               <div className="rounded-xl border bg-background p-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <p className="font-medium">OpenCV contour detection</p>
-                    <p className="text-sm text-muted-foreground">Primary DataMatrix detection and decoding pipeline.</p>
+                    <p className="font-medium">OpenCV 輪廓偵測</p>
+                    <p className="text-sm text-muted-foreground">主要 Data Matrix 偵測與解碼流程。</p>
                   </div>
-                  <Badge variant="success">Active</Badge>
+                  <Badge variant="success">啟用中</Badge>
                 </div>
               </div>
               <div className="rounded-xl border p-4">
-                <p className="font-medium">DataMatrix decoder</p>
-                <p className="mt-1 text-sm text-muted-foreground">Uses pylibdmtx and zxing-cpp as fallback decoders.</p>
+                <p className="font-medium">Data Matrix 解碼器</p>
+                <p className="mt-1 text-sm text-muted-foreground">採用 pylibdmtx，並以 zxing-cpp 作為備援解碼器。</p>
               </div>
             </div>
           </SectionCard>
 
-          <SectionCard title="Weekly trend" description="Simplified trend view of detected objects.">
+          <SectionCard title="每週趨勢" description="偵測物件數的簡化趨勢檢視。">
             <div className="space-y-3">
               {statsSummary.trends.map((trend) => (
                 <div key={trend.label} className="space-y-1">
                   <div className="flex items-center justify-between text-sm">
                     <span className="font-medium">{trend.label}</span>
-                    <span className="text-muted-foreground">{trend.objects} objects</span>
+                    <span className="text-muted-foreground">{trend.objects} 個物件</span>
                   </div>
                   <div className="h-2 rounded-full bg-muted">
                     <div className="h-2 rounded-full bg-primary" style={{ width: `${Math.min((trend.objects / 150) * 100, 100)}%` }} />

@@ -21,11 +21,11 @@ import {
 } from "@/components/ui/sidebar";
 
 const navigation = [
-  { href: "/dashboard", label: "Dashboard", icon: ChartBar },
-  { href: "/detection", label: "Image Detection", icon: ImageSquare },
-  { href: "/live-detection", label: "Live Detection", icon: Camera },
-  { href: "/batches", label: "Batch Records", icon: Database },
-  { href: "/models", label: "Models", icon: Cube },
+  { href: "/dashboard", label: "儀表板", icon: ChartBar },
+  { href: "/detection", label: "影像辨識", icon: ImageSquare },
+  { href: "/live-detection", label: "即時辨識", icon: Camera },
+  { href: "/batches", label: "批次紀錄", icon: Database },
+  { href: "/models", label: "模型", icon: Cube },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -50,7 +50,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </div>
                 <div className="grid flex-1 text-left text-sm leading-tight group-data-[collapsible=icon]:hidden">
                   <span className="truncate font-semibold tracking-tight text-foreground">BarcodeCV</span>
-                  <span className="truncate text-xs text-muted-foreground">Operations Console</span>
+                  <span className="truncate text-xs text-muted-foreground">營運主控台</span>
                 </div>
               </SidebarMenuButton>
             </SidebarMenuItem>
@@ -59,7 +59,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <SidebarContent>
           <SidebarGroup>
-            <SidebarGroupLabel className="group-data-[collapsible=icon]:opacity-0 font-medium">Navigation</SidebarGroupLabel>
+            <SidebarGroupLabel className="group-data-[collapsible=icon]:opacity-0 font-medium">導覽</SidebarGroupLabel>
             <SidebarMenu>
               {navigation.map(({ href, label, icon: Icon }) => {
                 const active = pathname === href || pathname.startsWith(`${href}/`);
@@ -86,7 +86,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="flex flex-1 items-center gap-3">
             <SidebarTrigger className="-ml-1" />
             <div className="h-4 w-px bg-border" />
-            <p className="text-xs text-muted-foreground">Production operations workspace</p>
+            <p className="text-xs text-muted-foreground">正式環境營運工作區</p>
           </div>
         </header>
 
