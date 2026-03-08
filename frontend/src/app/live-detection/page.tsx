@@ -764,7 +764,7 @@ export default function LiveDetectionPage() {
                     {lastScanInfo ? (
                       <>
                         <p className="text-sm text-muted-foreground">最後掃描結果：<span className="font-medium text-foreground">{lastScanInfo.count} 個物件</span></p>
-                        <p className="text-sm text-muted-foreground">耕耗時間：<span className="font-medium text-foreground">{lastScanInfo.elapsedMs} ms</span></p>
+                        <p className="text-sm text-muted-foreground">耗時：<span className="font-medium text-foreground">{lastScanInfo.elapsedMs} ms</span></p>
                         <p className="text-sm text-muted-foreground">時刻：<span className="font-medium text-foreground">{lastScanInfo.at.toLocaleTimeString()}</span></p>
                       </>
                     ) : (
@@ -774,7 +774,7 @@ export default function LiveDetectionPage() {
                 </div>
               ) : (
                 <div className="rounded-2xl border bg-muted/20 p-4">
-                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">本次擷取框要</p>
+                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">本次擷取摘要</p>
                   <div className="space-y-2">
                     <p className="text-sm text-muted-foreground">RID：<span className="font-medium text-foreground">{rid ?? "尚未擷取"}</span></p>
                     <p className="text-sm text-muted-foreground">物件數量：<span className="font-medium text-foreground">{objects.length}</span></p>
@@ -784,9 +784,14 @@ export default function LiveDetectionPage() {
               )}
 
               {error ? (
-                <div className="flex items-start gap-2 rounded-2xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-                  <WarningCircle size={18} className="mt-0.5 shrink-0" />
-                  <span>{error}</span>
+                <div className="rounded-2xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                  <div className="flex items-start gap-2">
+                    <WarningCircle size={18} className="mt-0.5 shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                  <Button size="sm" variant="outline" className="mt-2" onClick={() => void refreshCameras()}>
+                    Retry camera scan
+                  </Button>
                 </div>
               ) : null}
             </div>

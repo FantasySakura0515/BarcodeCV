@@ -13,37 +13,26 @@ import { Button } from "@/components/ui/button";
 import { useDetectionStore } from "@/stores/use-detection-store";
 
 export default function DetectionPage() {
-  const {
-    imageFile,
-    imageUrl,
-    rid,
-    objects,
-    selectedBid,
-    isLoading,
-    error,
-    setImageFile,
-    setSelectedBid,
-    clear,
-    submitDetection,
-  } = useDetectionStore();
+  const { imageFile, imageUrl, rid, objects, selectedBid, isLoading, error, setImageFile, setSelectedBid, clear, submitDetection } =
+    useDetectionStore();
 
   const selectedObject = objects.find((item) => item.bid === selectedBid) ?? null;
 
   return (
     <div className="space-y-6">
       <PageHeader
-        badge="已連接後端 API"
-        title="影像辨識"
-        description="上傳單張圖片後，呼叫 Python 後端執行 OpenCV DataMatrix 偵測、標記與解碼。"
+        badge="Image workflow"
+        title="Image Detection"
+        description="Upload one image, run backend detection, and review object-level barcode/OCR results."
         action={
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => submitDetection()} disabled={!imageFile || isLoading}>
               <Play size={16} />
-              {isLoading ? "辨識中..." : "開始辨識"}
+              {isLoading ? "Running..." : "Run detection"}
             </Button>
             <Button variant="outline" onClick={clear}>
               <Trash size={16} />
-              清除
+              Clear
             </Button>
           </div>
         }
@@ -53,57 +42,59 @@ export default function DetectionPage() {
         <div className="space-y-6">
           <UploadDropzone onFileSelect={setImageFile} fileName={imageFile?.name} />
 
-          <SectionCard title="辨識摘要" description="本次辨識摘要與目前選取物件資訊。">
+          <SectionCard title="Run summary" description="Current run status and selected object information.">
             <div className="space-y-3 text-sm">
               <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2">
-                <span className="text-muted-foreground">批次編號 (RID)</span>
-                <span className="font-medium">{rid ?? "尚未執行"}</span>
+                <span className="text-muted-foreground">Run ID (RID)</span>
+                <span className="font-medium">{rid ?? "Not started"}</span>
               </div>
               <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2">
-                <span className="text-muted-foreground">物件數量</span>
+                <span className="text-muted-foreground">Detected objects</span>
                 <span className="font-medium">{objects.length}</span>
               </div>
-              <div className="rounded-xl border p-4 shadow-sm bg-background/50">
-                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">目前選取物件</p>
+              <div className="rounded-xl border bg-background p-4">
+                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Selected object</p>
                 {selectedObject ? (
                   <div className="space-y-2">
-                    <p className="font-mono text-sm font-semibold break-all">{selectedObject.bid}</p>
-                    <p className="text-sm text-muted-foreground break-all">條碼： {selectedObject.barcodeValue ?? "未偵測到條碼"}</p>
-                    <p className="text-sm text-muted-foreground break-words">OCR： {selectedObject.ocrText ?? "無"}</p>
+                    <p className="break-all font-mono text-sm font-semibold">{selectedObject.bid}</p>
+                    <p className="break-all text-sm text-muted-foreground">Barcode: {selectedObject.barcodeValue ?? "Not detected"}</p>
+                    <p className="break-words text-sm text-muted-foreground">OCR: {selectedObject.ocrText ?? "None"}</p>
                   </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground">尚未選取物件</p>
+                  <p className="text-sm text-muted-foreground">No object selected.</p>
                 )}
               </div>
-              {error ? <p className="text-sm text-destructive">{error}</p> : null}
+              {error ? (
+                <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3">
+                  <p className="text-sm text-destructive">{error}</p>
+                  <Button size="sm" variant="outline" className="mt-2" onClick={() => submitDetection()} disabled={!imageFile || isLoading}>
+                    Retry
+                  </Button>
+                </div>
+              ) : null}
             </div>
           </SectionCard>
         </div>
 
         <div className="space-y-6">
           <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-            <DetectionCanvas
-              imageUrl={imageUrl}
-              objects={objects}
-              selectedBid={selectedBid}
-              onSelect={setSelectedBid}
-            />
+            <DetectionCanvas imageUrl={imageUrl} objects={objects} selectedBid={selectedBid} onSelect={setSelectedBid} />
           </motion.div>
 
           <SectionCard
-            title="辨識結果列表"
-            description="辨識結果列表與框選互動同步。"
+            title="Detection results"
+            description="Object list and box selection are synchronized."
             action={
               <Button variant="outline" disabled={!objects.length}>
                 <DownloadSimple size={16} />
-                下載結果
+                Export
               </Button>
             }
           >
             {objects.length ? (
               <ObjectResultTable items={objects} selectedBid={selectedBid} onSelect={setSelectedBid} />
             ) : (
-              <EmptyState title="尚無辨識結果" description="先上傳圖片並按下開始辨識，即可查看後端回傳的辨識結果。" />
+              <EmptyState title="No detection results" description="Upload an image and run detection to view object-level results." />
             )}
           </SectionCard>
         </div>

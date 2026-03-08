@@ -1,43 +1,59 @@
 import Link from "next/link";
 
+import { EmptyState } from "@/components/common/empty-state";
+import { ModelBadge } from "@/components/common/model-badge";
 import { PageHeader } from "@/components/common/page-header";
 import { SectionCard } from "@/components/common/section-card";
-import { ModelBadge } from "@/components/common/model-badge";
-import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchBatches } from "@/lib/api/client";
 
 export const dynamic = "force-dynamic";
 
 export default async function BatchesPage() {
-  const batches = await fetchBatches();
+  let batches;
+
+  try {
+    batches = await fetchBatches();
+  } catch {
+    return (
+      <div className="space-y-6">
+        <PageHeader badge="Record review" title="Batch Records" description="Review historical detection runs and outcomes." />
+        <EmptyState
+          title="Unable to load batch records"
+          description="The API request failed. Check backend availability and refresh to retry."
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       <PageHeader
-        badge="歷史紀錄"
-        title="批次檢測紀錄"
-        description="查詢歷史批次、成功率與模型資訊，供追蹤與統計使用。"
+        badge="Record review"
+        title="Batch Records"
+        description="Track historical runs, barcode/OCR outcomes, and model attribution."
       />
 
-      <SectionCard title="搜尋與列表" description="目前顯示後端資料，搜尋列保留作為下一階段篩選介面。">
-        <div className="mb-4 grid gap-3 md:grid-cols-3">
-          <Input placeholder="搜尋 RID / 條碼 / 日期" />
-          <Input placeholder="模型類型，例如 opencv" />
-          <Input placeholder="狀態，例如 success" />
-        </div>
+      <SectionCard title="Batch list" description="Detection runs returned by backend API.">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>批次編號 (RID)</TableHead>
-              <TableHead>物件總數</TableHead>
-              <TableHead>條碼成功數</TableHead>
-              <TableHead>OCR 成功數</TableHead>
-              <TableHead>模型類型</TableHead>
-              <TableHead>建立時間</TableHead>
+              <TableHead>Run ID (RID)</TableHead>
+              <TableHead>Objects</TableHead>
+              <TableHead>Barcode success</TableHead>
+              <TableHead>OCR success</TableHead>
+              <TableHead>Model</TableHead>
+              <TableHead>Created</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
+            {batches.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={6} className="h-20 text-center text-sm text-muted-foreground">
+                  No batch records available.
+                </TableCell>
+              </TableRow>
+            ) : null}
             {batches.map((batch) => (
               <TableRow key={batch.rid}>
                 <TableCell className="font-medium">
@@ -48,7 +64,9 @@ export default async function BatchesPage() {
                 <TableCell>{batch.objectCount}</TableCell>
                 <TableCell>{batch.barcodeSuccessCount}</TableCell>
                 <TableCell>{batch.ocrSuccessCount}</TableCell>
-                <TableCell><ModelBadge model={batch.model} /></TableCell>
+                <TableCell>
+                  <ModelBadge model={batch.model} />
+                </TableCell>
                 <TableCell className="text-muted-foreground">{new Date(batch.createdAt).toLocaleString()}</TableCell>
               </TableRow>
             ))}
