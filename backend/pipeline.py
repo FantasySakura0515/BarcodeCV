@@ -4,8 +4,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from threading import Event
+from typing import Protocol, runtime_checkable
 
 import cv2
+import numpy as np
 
 from .camera.camera_manager import CameraManager
 from .database.repository import BoxRecord, BoxRepository, ScanRecord, ScanRepository
@@ -18,14 +20,24 @@ from .utils.image_utils import enhance_contrast, sharpen
 logger = logging.getLogger("barcodecv.pipeline")
 
 
+@runtime_checkable
+class _ScannerProtocol(Protocol):
+    """Structural interface shared by CompositeScanner and NNDecoder."""
+
+    def scan(self, image: np.ndarray) -> list[ScanResult]:
+        ...
+
+    def name(self) -> str:
+        ...
+
+
 class ScanPipeline:
     """Orchestrates the Global-to-Local DataMatrix scan cycle.
 
-    Supports two detection strategies:
-      - "library" (default): Use pylibdmtx/zxing-cpp to directly scan entire images.
-        No YOLO model needed. Simpler and works out of the box.
-      - "yolo": Use a trained YOLO model for detection, then crop and decode.
-        Better for small/distant codes. Requires a trained model.
+    Supports two scanner backends (set via ``config.scanner.mode``):
+      - ``"nn"`` (default): YOLO detection + CRNN recognition — fully neural
+        network pipeline; no third-party barcode libraries required at runtime.
+      - ``"library"``: Legacy pylibdmtx/zxing-cpp composite scanner.
 
     When box_detector is provided, each scan also detects boxes on the surface
     and flags any box without a matching DataMatrix as "missing_datamatrix".
@@ -34,7 +46,7 @@ class ScanPipeline:
     def __init__(
         self,
         camera_manager: CameraManager,
-        scanner: CompositeScanner,
+        scanner: _ScannerProtocol,
         repository: ScanRepository,
         config: dict,
         box_detector: BoxDetector | None = None,

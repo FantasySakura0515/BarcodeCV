@@ -18,11 +18,28 @@ from .database.db_manager import DatabaseManager
 from .database.repository import BoxRepository, ScanRepository
 from .decoding.decoder import DataMatrixDecoder, DecodeResult
 from .decoding.direct_scanner import CompositeScanner
+from .decoding.nn_decoder import NNDecoder
 from .detection.box_detector import BoxDetector
 from .detection.spatial_matcher import ScanSummary, SpatialMatcher
 from .pipeline import ScanPipeline
 from .utils.config_loader import load_config
 from .utils.logger import setup_logger
+
+
+def _create_scanner(config: dict):
+    """Create the appropriate scanner based on ``config.scanner.mode``.
+
+    Returns:
+        An ``NNDecoder`` (YOLO + CRNN) when ``scanner.mode == "nn"``, or a
+        ``CompositeScanner`` (pylibdmtx + zxing-cpp) for ``"library"`` mode.
+    """
+    mode = config.get("scanner", {}).get("mode", "nn")
+    if mode == "library":
+        return CompositeScanner.from_config(config)
+    # Default: neural network pipeline
+    decoder = NNDecoder.from_config(config)
+    decoder.load_models()
+    return decoder
 
 
 def main():
@@ -123,7 +140,7 @@ def _run_preview(config: dict):
             elif key == ord("s"):
                 # One-shot scan on current frame
                 logger.info("Scanning current frame...")
-                scanner = CompositeScanner.from_config(config)
+                scanner = _create_scanner(config)
                 results = scanner.scan(preprocess_for_detection(global_frame.image))
                 for r in results:
                     if r.success:
@@ -136,13 +153,13 @@ def _run_preview(config: dict):
 
 
 def _run_scanning(config: dict, mode: str):
-    """Run single or continuous scanning mode using library-based detection."""
+    """Run single or continuous scanning mode."""
     import logging
 
     logger = logging.getLogger("barcodecv")
 
     camera_manager = CameraManager.from_config(config)
-    scanner = CompositeScanner.from_config(config)
+    scanner = _create_scanner(config)
     db_manager = DatabaseManager(
         db_path=config["database"]["path"],
         wal_mode=config["database"].get("wal_mode", True),
@@ -202,17 +219,17 @@ def _run_calibration(config: dict):
     logger = logging.getLogger("barcodecv")
 
     camera_manager = CameraManager.from_config(config)
-    scanner = CompositeScanner.from_config(config)
+    scanner = _create_scanner(config)
     scorer = FocusScorer()
 
     cal_cfg = config.get("calibration", {})
     distances = cal_cfg.get("sweep_distances_mm", [50, 100, 150, 200, 250, 300])
     metric = cal_cfg.get("focus_metric", "laplacian")
 
-    # Adapt CompositeScanner to the DataMatrixDecoder interface for the calibrator
+    # Adapt the scanner to the DataMatrixDecoder interface for the calibrator
     class _ScannerAdapter(DataMatrixDecoder):
-        def __init__(self, composite: CompositeScanner):
-            self._scanner = composite
+        def __init__(self, _scanner) -> None:
+            self._scanner = _scanner
 
         def decode(self, image):
             results = self._scanner.scan(image)

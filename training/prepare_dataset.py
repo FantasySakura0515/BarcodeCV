@@ -1,7 +1,19 @@
 """Generate synthetic DataMatrix training images with YOLO-format annotations.
 
+Produces bounding-box labels for the YOLO detection model (Stage 1).
+For the CRNN recognition model (Stage 2) use prepare_recognition_dataset.py.
+
 Usage:
     python -m training.prepare_dataset --num-images 2000 --output-dir training/data
+
+Requirements (training machine only):
+    pip install pylibdmtx Pillow opencv-python
+
+Note:
+    ``pylibdmtx.pylibdmtx.encode`` is used here as a *barcode image generator*
+    for training data.  It is a training-time dependency only and is NOT
+    imported at inference time.  The production runtime replaces all
+    recognition (decode) calls with the neural network pipeline.
 """
 
 import argparse
@@ -21,7 +33,12 @@ def generate_random_content(min_len: int = 4, max_len: int = 30) -> str:
 
 
 def encode_datamatrix(content: str) -> np.ndarray | None:
-    """Encode content as a DataMatrix image using pylibdmtx."""
+    """Render *content* as a DataMatrix image using pylibdmtx.encode.
+
+    This calls the *encoder* side of pylibdmtx to generate synthetic training
+    images.  The *decoder* side is never used — recognition at inference time
+    is handled entirely by the trained CRNN model.
+    """
     try:
         from pylibdmtx.pylibdmtx import encode
 
