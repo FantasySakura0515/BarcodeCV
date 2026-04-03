@@ -580,8 +580,13 @@ class CameraService:
             frame = source.capture_frame()
             return True, f"{frame.resolution[0]}x{frame.resolution[1]}"
         except Exception as exc:
-            logger.warning("PiCamera probe failed for camera %d: %s", camera_num, exc)
-            return False, str(exc)
+            error_message = str(exc)
+            if error_message == "list index out of range":
+                error_message = (
+                    "picamera2 無法開啟指定鏡頭；通常代表目前系統未偵測到任何 CSI camera。"
+                )
+            logger.warning("PiCamera probe failed for camera %d: %s", camera_num, error_message)
+            return False, error_message
         finally:
             try:
                 source.close()

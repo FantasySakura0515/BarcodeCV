@@ -14,6 +14,10 @@ logger = logging.getLogger("barcodecv.camera")
 # XBGR8888 → 4-ch XBGR, drop 4th channel
 # RGB888  → 3-ch RGB, swap to BGR
 _PROBE_FORMATS = ["BGR888", "XBGR8888", "RGB888"]
+_CAMERA_LIST_COMMANDS = (
+    ("rpicam-hello", "--list-cameras"),
+    ("libcamera-hello", "--list-cameras"),
+)
 
 
 class PiCameraSource(CameraSource):
@@ -159,12 +163,47 @@ class PiCameraSource(CameraSource):
             self.open()
 
     @staticmethod
+    def _parse_camera_list_output(output: str) -> list[dict]:
+        cams: list[dict] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if line and line[0].isdigit() and " : " in line:
+                parts = line.split(" : ", 1)
+                num = int(parts[0].strip())
+                model = parts[1].split(" ")[0] if parts[1] else "unknown"
+                cams.append({"Num": num, "Model": model, "Id": f"cli{num}"})
+        return cams
+
+    @staticmethod
+    def _list_cameras_from_cli() -> list[dict]:
+        for command in _CAMERA_LIST_COMMANDS:
+            try:
+                result = subprocess.run(
+                    list(command),
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                output = result.stdout + result.stderr
+                logger.debug("%s output: %s", command[0], output)
+                cams = PiCameraSource._parse_camera_list_output(output)
+                if cams:
+                    logger.debug("%s found cameras: %s", command[0], cams)
+                    return cams
+            except FileNotFoundError:
+                logger.debug("%s not found", command[0])
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("%s subprocess failed: %s", command[0], exc)
+        return []
+
+    @staticmethod
     def available_cameras() -> list[dict]:
         """Non-invasive camera enumeration.
 
         Tries (in order):
         1. ``Picamera2.global_camera_info()`` — fast, no device open required.
-        2. ``libcamera-hello --list-cameras`` via subprocess — works even when
+        2. ``rpicam-hello --list-cameras`` / ``libcamera-hello --list-cameras``
+           via subprocess — works even when
            the picamera2 Python package is not in the active venv (e.g. system
            install only).
 
@@ -182,36 +221,8 @@ class PiCameraSource(CameraSource):
         except Exception as exc:  # noqa: BLE001
             logger.debug("global_camera_info failed: %s", exc)
 
-        # --- Strategy 2: libcamera CLI subprocess ---
-        try:
-            result = subprocess.run(
-                ["libcamera-hello", "--list-cameras"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            output = result.stdout + result.stderr
-            logger.debug("libcamera-hello output: %s", output)
-
-            # Parse lines like:  "0 : imx708 [...]" or "Available cameras"
-            cams: list[dict] = []
-            for line in output.splitlines():
-                line = line.strip()
-                # Match "  0 : imx708 [...]"
-                if line and line[0].isdigit() and " : " in line:
-                    parts = line.split(" : ", 1)
-                    num = int(parts[0].strip())
-                    model = parts[1].split(" ")[0] if parts[1] else "unknown"
-                    cams.append({"Num": num, "Model": model, "Id": f"libcam{num}"})
-            if cams:
-                logger.debug("libcamera-hello found cameras: %s", cams)
-                return cams
-        except FileNotFoundError:
-            logger.debug("libcamera-hello not found (not running on RPi?)")
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("libcamera-hello subprocess failed: %s", exc)
-
-        return []
+        # --- Strategy 2: rpicam/libcamera CLI subprocess ---
+        return PiCameraSource._list_cameras_from_cli()
 
     @staticmethod
     def diagnose() -> dict:
@@ -243,21 +254,23 @@ class PiCameraSource(CameraSource):
         except Exception as exc:  # noqa: BLE001
             info["global_camera_info_error"] = str(exc)
 
-        # libcamera-hello CLI
-        try:
-            result = subprocess.run(
-                ["libcamera-hello", "--list-cameras"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            info["libcamera_hello_stdout"] = result.stdout
-            info["libcamera_hello_stderr"] = result.stderr
-            info["libcamera_hello_returncode"] = result.returncode
-        except FileNotFoundError:
-            info["libcamera_hello_error"] = "libcamera-hello not found"
-        except Exception as exc:  # noqa: BLE001
-            info["libcamera_hello_error"] = str(exc)
+        # rpicam/libcamera CLI
+        for binary in ("rpicam-hello", "libcamera-hello"):
+            key_prefix = binary.replace("-", "_")
+            try:
+                result = subprocess.run(
+                    [binary, "--list-cameras"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                info[f"{key_prefix}_stdout"] = result.stdout
+                info[f"{key_prefix}_stderr"] = result.stderr
+                info[f"{key_prefix}_returncode"] = result.returncode
+            except FileNotFoundError:
+                info[f"{key_prefix}_error"] = f"{binary} not found"
+            except Exception as exc:  # noqa: BLE001
+                info[f"{key_prefix}_error"] = str(exc)
 
         # v4l2 devices
         try:

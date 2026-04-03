@@ -16,6 +16,21 @@ import sys
 SEP = "-" * 60
 
 
+def run_first_available_camera_list_command():
+    for command in (["rpicam-hello", "--list-cameras"], ["libcamera-hello", "--list-cameras"]):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return command[0], result
+        except FileNotFoundError:
+            continue
+    raise FileNotFoundError("Neither rpicam-hello nor libcamera-hello is installed")
+
+
 def section(title: str) -> None:
     print(f"\n{SEP}")
     print(f"  {title}")
@@ -46,18 +61,14 @@ ok(f"Python {sys.version}")
 ok(f"Executable: {sys.executable}")
 
 # ---------------------------------------------------------------------------
-# 2. System: libcamera-hello
+# 2. System: rpicam/libcamera list
 # ---------------------------------------------------------------------------
-section("2. libcamera-hello --list-cameras")
+section("2. rpicam-hello/libcamera-hello --list-cameras")
 try:
-    r = subprocess.run(
-        ["libcamera-hello", "--list-cameras"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    binary, r = run_first_available_camera_list_command()
     combined = r.stdout + r.stderr
     if r.returncode == 0 or combined.strip():
+        ok(f"Using {binary}")
         for line in combined.splitlines():
             info(line)
         if "No cameras available" in combined or ("0" not in combined):
@@ -65,9 +76,9 @@ try:
         else:
             ok("libcamera sees at least one camera")
     else:
-        fail(f"libcamera-hello returned code {r.returncode} with no output")
+        fail(f"{binary} returned code {r.returncode} with no output")
 except FileNotFoundError:
-    fail("libcamera-hello not found \u2014 run: sudo apt install libcamera-apps")
+    fail("rpicam-hello/libcamera-hello not found \u2014 install rpicam-apps or libcamera-apps")
 except Exception as exc:
     fail(f"Unexpected error: {exc}")
 
@@ -212,7 +223,7 @@ except Exception as exc:
 # ---------------------------------------------------------------------------
 section("Summary / next steps")
 print("""
-  If step 2 (libcamera-hello) shows no cameras:
+  If step 2 (rpicam/libcamera list) shows no cameras:
     \u2192 Physical issue: check ribbon cable, camera enable in /boot/config.txt
        sudo raspi-config  \u2192 Interface Options \u2192 Camera (legacy) or
        add  dtoverlay=vc4-kms-v3d  &  camera_auto_detect=1  to /boot/config.txt
