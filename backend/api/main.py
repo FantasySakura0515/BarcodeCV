@@ -7,6 +7,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 
 from .schemas import (
     CameraInfo,
@@ -181,16 +182,25 @@ def _to_setting_info(row) -> SettingInfo:
 
 
 def _to_detection_response(result) -> DetectionResponse:
-    return DetectionResponse(
-        rid=result.rid,
-        imagePath=result.image_path,
-        objects=result.objects,
-        sourceImage=result.source_image,
-        objectCount=result.object_count,
-        datamatrixSuccessCount=result.datamatrix_success_count,
-        requiresReposition=result.requires_reposition,
-        placementHint=result.placement_hint,
-    )
+    try:
+        return DetectionResponse(
+            rid=result.rid,
+            imagePath=result.image_path,
+            objects=result.objects,
+            sourceImage=result.source_image,
+            objectCount=result.object_count,
+            datamatrixSuccessCount=result.datamatrix_success_count,
+            requiresReposition=result.requires_reposition,
+            placementHint=result.placement_hint,
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Detection response schema validation failed",
+                "errors": exc.errors(),
+            },
+        ) from exc
 
 
 @app.get("/api/health")

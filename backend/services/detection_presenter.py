@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import math
 from typing import Any, Mapping
 
 from ..decoding.direct_scanner import sanitize_decoded_text
@@ -43,7 +44,14 @@ def build_object_dict(row: Mapping[str, Any], rid: str, model: dict[str, Any]) -
     box_detected = load_json(row["box_detected"] if "box_detected" in keys else None)
     matrix_detected = load_json(row["matrix_detected"] if "matrix_detected" in keys else None)
     bbox = box_detected.get("bbox") or {}
-    confidence = float(box_detected.get("confidenceScore") or 0.0)
+    raw_confidence = box_detected.get("confidenceScore") or 0.0
+    try:
+        confidence = float(raw_confidence)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
     barcode_value = sanitize_decoded_text(matrix_detected.get("barcodeValue"))
     barcode_type = matrix_detected.get("barcodeType") if barcode_value else None
 

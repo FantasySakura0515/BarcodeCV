@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import math
 import sqlite3
 from pathlib import Path
 import uuid
@@ -108,7 +109,7 @@ class DetectionService:
 
         rid = uuid.uuid4().hex[:8].upper()
         now = datetime.now().isoformat()
-        model = self._model_service.get_active_model(model_type)
+        model = self._normalize_model_payload(self._model_service.get_active_model(model_type), now)
         batch_id = self._biz_repo.create_batch(
             code=rid,
             name=f"Detection Batch {rid}",
@@ -161,7 +162,7 @@ class DetectionService:
 
         rid = f"LIVE-{uuid.uuid4().hex[:8].upper()}"
         now = datetime.now().isoformat()
-        model = self._model_service.get_active_model(model_type)
+        model = self._normalize_model_payload(self._model_service.get_active_model(model_type), now)
 
         input_path = self._save_image(image, f"{rid}_{Path(filename).stem}_preview.png") if save_preview_image else None
         detections = self._pipeline.apply_confidence_filter(
@@ -233,6 +234,8 @@ class DetectionService:
             row_id: int | None = None
             bid = f"LIVE-{index:03d}"
             normalized_content = sanitize_decoded_text(detection.content)
+            bbox = self._normalize_bbox(getattr(detection, "bbox", None))
+            confidence_score = self._normalize_confidence(getattr(detection, "confidence", 0.0))
 
             if persist:
                 bid = self._biz_repo.make_task_code(rid)
@@ -245,12 +248,12 @@ class DetectionService:
                         data_url=annotated_path,
                         box_detected={
                             "bbox": {
-                                "x1": int(detection.bbox[0]),
-                                "y1": int(detection.bbox[1]),
-                                "x2": int(detection.bbox[2]),
-                                "y2": int(detection.bbox[3]),
+                                "x1": bbox[0],
+                                "y1": bbox[1],
+                                "x2": bbox[2],
+                                "y2": bbox[3],
                             },
-                            "confidenceScore": float(detection.confidence or 0.0),
+                            "confidenceScore": confidence_score,
                             "source": camera_id or detection.detection_source or image_source,
                             "inputImagePath": input_path,
                         },
@@ -271,15 +274,15 @@ class DetectionService:
                     "rid": rid,
                     "bid": bid,
                     "bbox": {
-                        "x1": int(detection.bbox[0]),
-                        "y1": int(detection.bbox[1]),
-                        "x2": int(detection.bbox[2]),
-                        "y2": int(detection.bbox[3]),
+                        "x1": bbox[0],
+                        "y1": bbox[1],
+                        "x2": bbox[2],
+                        "y2": bbox[3],
                     },
                     "barcodeValue": normalized_content or None,
                     "barcodeType": "DataMatrix" if normalized_content else None,
                     "ocrText": None,
-                    "confidenceScore": float(detection.confidence or 0.0),
+                    "confidenceScore": confidence_score,
                     "modelId": model["id"],
                     "model": model,
                     "imagePath": annotated_path,
@@ -290,6 +293,57 @@ class DetectionService:
             )
 
         return objects
+
+    @staticmethod
+    def _normalize_confidence(value: object) -> float:
+        try:
+            score = float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+        if not math.isfinite(score):
+            return 0.0
+
+        return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _normalize_bbox(raw_bbox: object) -> tuple[int, int, int, int]:
+        if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) < 4:
+            return (0, 0, 0, 0)
+
+        values: list[int] = []
+        for raw in raw_bbox[:4]:
+            try:
+                num = float(raw)
+                if not math.isfinite(num):
+                    values.append(0)
+                else:
+                    values.append(int(round(num)))
+            except (TypeError, ValueError):
+                values.append(0)
+
+        x1, y1, x2, y2 = values
+        # Ensure bbox is not inverted.
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+        return (x1, y1, x2, y2)
+
+    @staticmethod
+    def _normalize_model_payload(model: dict, now: str) -> dict:
+        return {
+            "id": str(model.get("id") or "opencv-dm-v1"),
+            "modelName": str(model.get("modelName") or "OpenCV DataMatrix Detector"),
+            "modelType": str(model.get("modelType") or "opencv"),
+            "modelVersion": str(model.get("modelVersion") or "unknown"),
+            "framework": str(model.get("framework") or "opencv"),
+            "modelPath": str(model.get("modelPath") or ""),
+            "isActive": bool(model.get("isActive", True)),
+            "remark": str(model["remark"]) if model.get("remark") is not None else None,
+            "createdAt": str(model.get("createdAt") or now),
+            "updatedAt": str(model.get("updatedAt") or now),
+        }
 
     def _decode_image(self, file_bytes: bytes) -> np.ndarray:
         array = np.frombuffer(file_bytes, dtype=np.uint8)
