@@ -335,7 +335,7 @@ class CameraService:
         )
 
     def _probe_by_type(self, source_type: str, camera_num: int) -> tuple[bool, str | None]:
-        if source_type == "opencv":
+        if source_type == "opencv" or source_type == "arducam":
             return self._probe_opencv(camera_num)
         return self._probe_picamera(camera_num)
 
@@ -403,7 +403,7 @@ class CameraService:
         width = int(cfg.get("width", 1280))
         height = int(cfg.get("height", 720))
 
-        if source_type == "opencv":
+        if source_type == "opencv" or source_type == "arducam":
             return OpenCVCameraSource(
                 camera_num=camera_num,
                 width=width,

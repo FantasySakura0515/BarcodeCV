@@ -8,13 +8,13 @@ system:
 
 cameras:
   global:
-    type: "picamera"
+    type: "arducam"
     camera_num: 0
     width: 1920
     height: 1080
     role: "detection"
   local:
-    type: "picamera"
+    type: "arducam"
     camera_num: 1
     width: 1920
     height: 1080
