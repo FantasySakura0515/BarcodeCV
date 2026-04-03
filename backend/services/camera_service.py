@@ -92,7 +92,7 @@ class CameraService:
             cameras.append(info)
             seen_ids.add(camera_id)
 
-        for index in range(5):
+        for index in range(10):
             camera_id = f"opencv-{index}"
             if camera_id in seen_ids:
                 continue
