@@ -131,7 +131,7 @@ export default function LiveDetectionPage() {
     setSelectedBid(obj?.bid ?? null);
   };
   const handleToggleScan = () => {
-    if (isScanningLive) {
+    if (isPreviewing) {
       stopPreview();
     } else {
       startPreview();
@@ -149,7 +149,6 @@ export default function LiveDetectionPage() {
   const [isLoadingCameras, setIsLoadingCameras] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [isScanningLive, setIsScanningLive] = useState(false);
   const [lastScanInfo, setLastScanInfo] = useState<{ count: number; elapsedMs: number; at: Date } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [performanceMode, setPerformanceMode] = useState<PerformanceMode>("auto");
@@ -381,7 +380,6 @@ export default function LiveDetectionPage() {
       while (!cancelled) {
         const cycleStart = Date.now();
         try {
-          if (!cancelled && previewSessionRef.current === sessionId) setIsScanningLive(true);
           if (selectedCamera.sourceScope === "backend") {
             const response = await fetchLiveCameraDetection(
               selectedCameraId,
@@ -415,8 +413,6 @@ export default function LiveDetectionPage() {
             const message = err instanceof Error ? err.message : "即時辨識失敗";
             setError(message);
           }
-        } finally {
-          if (!cancelled && previewSessionRef.current === sessionId) setIsScanningLive(false);
         }
         // Wait only the remaining time so that minCycleMs is the TOTAL period,
         // not an extra delay added after detection. Minimum 50ms to yield the
@@ -434,7 +430,6 @@ export default function LiveDetectionPage() {
       if (previewSessionRef.current === sessionId) {
         previewSessionRef.current += 1;
       }
-      setIsScanningLive(false);
     };
   }, [isPreviewing, performanceProfile.minCycleMs, performanceProfile.detectScale, performanceTargetSize, previewFromBrowserCamera, selectedCamera, selectedCameraId]);
 
@@ -458,7 +453,6 @@ export default function LiveDetectionPage() {
   }
 
   function resetLiveOverlayState() {
-    setIsScanningLive(false);
     setLastScanInfo(null);
     setStableObjects([]);
     setOverlaySourceSize(null);
@@ -766,10 +760,10 @@ export default function LiveDetectionPage() {
             <Button
               onClick={handleToggleScan}
               disabled={isSwitchingCamera || !selectedCameraId}
-              variant={isScanningLive ? "destructive" : "default"}
+              variant={isPreviewing ? "destructive" : "default"}
               size="sm"
               className={
-                isScanningLive
+                isPreviewing
                   ? "bg-red-900/40 text-red-400 hover:bg-red-900/60 border border-red-800/50 uppercase tracking-wider font-semibold"
                   : "bg-cyan-900/40 text-cyan-400 hover:bg-cyan-900/60 border border-cyan-800/50 uppercase tracking-wider font-semibold shadow-[0_0_15px_rgba(6,182,212,0.15)]"
               }
@@ -779,7 +773,7 @@ export default function LiveDetectionPage() {
                   <ArrowsClockwise className="mr-2 h-4 w-4 animate-spin" />
                   切換中
                 </>
-              ) : isScanningLive ? (
+              ) : isPreviewing ? (
                 <>
                   <Stop className="mr-2 h-4 w-4" />
                   停止掃描
@@ -814,7 +808,7 @@ export default function LiveDetectionPage() {
                       鏡頭畫面
                     </h2>
                   </div>
-                  {isScanningLive && (
+                  {isPreviewing && (
                     <div className="flex items-center gap-2">
                         <span className="relative flex h-2 w-2">
                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
@@ -930,7 +924,7 @@ export default function LiveDetectionPage() {
                    <div className="space-y-4 relative z-10">
                     <div className="rounded-lg border border-cyan-900/20 bg-black/50 p-3 flex items-center justify-between">
                        <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80">目前狀態</p>
-                       {isScanningLive ? (
+                         {isPreviewing ? (
                            <span className="flex items-center gap-1.5 text-xs font-bold text-red-500 tracking-wider">
                                 <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse"></span>
                                 SCANNING
@@ -942,7 +936,7 @@ export default function LiveDetectionPage() {
                            </span>
                        )}
                     </div>
-                    {isScanningLive && (
+                    {isPreviewing && (
                         <div className="rounded-lg border border-cyan-900/20 bg-black/50 p-3">
                             <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80 mb-2">更新頻率</p>
                             <div className="flex items-center gap-3">

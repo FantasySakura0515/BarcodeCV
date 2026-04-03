@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import functools
+import importlib.util
 import logging
+import sys
 import threading
 import time as _time
 from dataclasses import dataclass
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -63,6 +67,104 @@ _ACTIVE_STREAMS_MU = threading.Lock()
 def _is_streaming(camera_id: str) -> bool:
     with _ACTIVE_STREAMS_MU:
         return _ACTIVE_STREAMS.get(camera_id, False)
+
+
+@functools.lru_cache(maxsize=1)
+def _is_raspberry_pi() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+
+    try:
+        with open("/proc/device-tree/model", "r", encoding="utf-8", errors="ignore") as model_file:
+            return "raspberry pi" in model_file.read().lower()
+    except OSError:
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def _is_picamera2_available() -> bool:
+    return importlib.util.find_spec("picamera2") is not None
+
+
+class _FallbackCameraSource(CameraSource):
+    """Try primary backend first, then fallback backend if open() fails."""
+
+    def __init__(
+        self,
+        *,
+        camera_id: str,
+        primary_name: str,
+        fallback_name: str,
+        primary_factory: Callable[[], CameraSource],
+        fallback_factory: Callable[[], CameraSource],
+    ):
+        self._camera_id = camera_id
+        self._primary_name = primary_name
+        self._fallback_name = fallback_name
+        self._primary_factory = primary_factory
+        self._fallback_factory = fallback_factory
+        self._active_source: CameraSource | None = None
+
+    def open(self) -> None:
+        primary = self._primary_factory()
+        try:
+            primary.open()
+            self._active_source = primary
+            return
+        except Exception as primary_exc:
+            try:
+                primary.close()
+            except Exception:
+                pass
+
+            logger.warning(
+                "Camera %s primary backend (%s) failed: %s. Trying fallback (%s).",
+                self._camera_id,
+                self._primary_name,
+                primary_exc,
+                self._fallback_name,
+            )
+
+            fallback = self._fallback_factory()
+            try:
+                fallback.open()
+                self._active_source = fallback
+                return
+            except Exception as fallback_exc:
+                try:
+                    fallback.close()
+                except Exception:
+                    pass
+
+                raise RuntimeError(
+                    f"鏡頭 {self._camera_id} 無法開啟: "
+                    f"{self._primary_name}={primary_exc}; {self._fallback_name}={fallback_exc}"
+                ) from fallback_exc
+
+    def close(self) -> None:
+        if self._active_source is not None:
+            self._active_source.close()
+            self._active_source = None
+
+    def capture_frame(self):
+        source = self._require_active_source()
+        return source.capture_frame()
+
+    def is_open(self) -> bool:
+        return self._active_source is not None and self._active_source.is_open()
+
+    def get_resolution(self) -> tuple[int, int]:
+        source = self._require_active_source()
+        return source.get_resolution()
+
+    def set_resolution(self, width: int, height: int) -> None:
+        source = self._require_active_source()
+        source.set_resolution(width, height)
+
+    def _require_active_source(self) -> CameraSource:
+        if self._active_source is None:
+            raise RuntimeError(f"Camera {self._camera_id} is not open")
+        return self._active_source
 
 
 @dataclass
@@ -335,6 +437,19 @@ class CameraService:
         )
 
     def _probe_by_type(self, source_type: str, camera_num: int) -> tuple[bool, str | None]:
+        if source_type == "arducam" and _is_raspberry_pi():
+            # Arducam on Raspberry Pi is usually CSI/libcamera (picamera2).
+            # If picamera2 fails, still try OpenCV once for USB fallback setups.
+            picam_ok, picam_status = self._probe_picamera(camera_num)
+            if picam_ok:
+                return True, picam_status
+
+            opencv_ok, opencv_status = self._probe_opencv(camera_num)
+            if opencv_ok:
+                return True, f"opencv fallback: {opencv_status}"
+
+            return False, f"picamera={picam_status}; opencv={opencv_status}"
+
         if source_type == "opencv" or source_type == "arducam":
             return self._probe_opencv(camera_num)
         return self._probe_picamera(camera_num)
@@ -402,6 +517,34 @@ class CameraService:
         camera_num = int(cfg.get("camera_num", 0))
         width = int(cfg.get("width", 1280))
         height = int(cfg.get("height", 720))
+
+        if source_type == "arducam" and _is_raspberry_pi():
+            # On Raspberry Pi, prefer picamera2/libcamera for Arducam CSI sensors.
+            # Keep OpenCV as runtime fallback for USB adapter scenarios.
+            if not _is_picamera2_available():
+                logger.warning(
+                    "Camera %s is configured as arducam on Raspberry Pi but picamera2 is unavailable; "
+                    "will attempt OpenCV fallback after Picamera2 fails.",
+                    camera_id,
+                )
+
+            return _FallbackCameraSource(
+                camera_id=camera_id,
+                primary_name="picamera2",
+                fallback_name="opencv",
+                primary_factory=lambda: PiCameraSource(
+                    camera_num=camera_num,
+                    width=width,
+                    height=height,
+                    camera_id=camera_id,
+                ),
+                fallback_factory=lambda: OpenCVCameraSource(
+                    camera_num=camera_num,
+                    width=width,
+                    height=height,
+                    camera_id=camera_id,
+                ),
+            )
 
         if source_type == "opencv" or source_type == "arducam":
             return OpenCVCameraSource(
