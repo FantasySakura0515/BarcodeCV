@@ -351,6 +351,7 @@ def debug_cameras() -> dict:
     """
     diagnostics = PiCameraSource.diagnose()
     suggested_fixes: list[str] = []
+    picamera_num_mapping_preview: list[dict] = []
 
     if diagnostics.get("picamera2_import_error"):
         suggested_fixes.append(
@@ -360,6 +361,40 @@ def debug_cameras() -> dict:
 
     if diagnostics.get("global_camera_info_error") and not diagnostics.get("global_camera_info"):
         suggested_fixes.append("libcamera-hello --list-cameras")
+
+    global_camera_info = diagnostics.get("global_camera_info")
+    if isinstance(global_camera_info, list):
+        available_nums: list[int] = []
+        for i, info in enumerate(global_camera_info):
+            if not isinstance(info, dict):
+                continue
+            raw_num = info.get("Num", i)
+            try:
+                available_nums.append(int(raw_num))
+            except (TypeError, ValueError):
+                available_nums.append(i)
+
+        configured = getattr(app.state, "config", {}).get("cameras", {})
+        if isinstance(configured, dict) and available_nums:
+            for role, cfg in configured.items():
+                if not isinstance(cfg, dict):
+                    continue
+                configured_num = int(cfg.get("camera_num", 0))
+                resolved_num = configured_num
+                remapped = False
+                if configured_num not in available_nums and 0 <= configured_num < len(available_nums):
+                    resolved_num = available_nums[configured_num]
+                    remapped = True
+
+                picamera_num_mapping_preview.append(
+                    {
+                        "camera_id": role,
+                        "configured_num": configured_num,
+                        "resolved_num": resolved_num,
+                        "remapped": remapped,
+                        "available_nums": available_nums,
+                    }
+                )
 
     return {
         "configured_cameras": list(getattr(app.state, "config", {}).get("cameras", {}).keys()),
@@ -374,6 +409,7 @@ def debug_cameras() -> dict:
             for item in get_camera_service().list_cameras()
         ],
         "system_diagnostics": diagnostics,
+        "picamera_num_mapping_preview": picamera_num_mapping_preview,
         "suggested_fixes": suggested_fixes,
     }
 

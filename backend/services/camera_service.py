@@ -205,6 +205,35 @@ class CameraService:
         self._config = config
         self._detection_service = detection_service
 
+    @staticmethod
+    def _extract_picamera_numbers(available_cams: list[dict]) -> list[int]:
+        numbers: list[int] = []
+        for i, info in enumerate(available_cams):
+            raw_num = info.get("Num", i)
+            try:
+                numbers.append(int(raw_num))
+            except (TypeError, ValueError):
+                numbers.append(i)
+        return numbers
+
+    def _resolve_picamera_num(self, configured_num: int, available_cams: list[dict] | None = None) -> tuple[int, bool, list[int]]:
+        cams = available_cams if available_cams is not None else PiCameraSource.available_cameras()
+        available_nums = self._extract_picamera_numbers(cams)
+
+        if not available_nums:
+            return configured_num, False, []
+
+        if configured_num in available_nums:
+            return configured_num, False, available_nums
+
+        if 0 <= configured_num < len(available_nums):
+            # Treat configured_num as ordinal index when actual Num values are
+            # non-contiguous (common on some Arducam/libcamera stacks).
+            resolved_num = available_nums[configured_num]
+            return resolved_num, True, available_nums
+
+        return configured_num, False, available_nums
+
     def list_cameras(self) -> list[CameraInfo]:
         cameras: list[CameraInfo] = []
         seen_ids: set[str] = set()
@@ -519,30 +548,49 @@ class CameraService:
         logger.info("PiCamera probe: available_cameras() = %s", available_cams)
 
         if available_cams:
-            available_nums = [info.get("Num", i) for i, info in enumerate(available_cams)]
-            if camera_num not in available_nums:
+            resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num, available_cams)
+            if resolved_num not in available_nums:
                 msg = f"鏡頭 {camera_num} 未找到 (可用索引: {available_nums})"
                 logger.warning("PiCamera probe: %s", msg)
                 return False, msg
             # Camera index exists — return info without fully opening it
-            info = available_cams[available_nums.index(camera_num)]
+            info = available_cams[available_nums.index(resolved_num)]
             model = info.get("Model", "unknown")
-            status = f"picam{camera_num} ({model})"
-            logger.info("PiCamera probe: camera %d found — %s", camera_num, status)
+            status = f"picam{resolved_num} ({model})"
+            if remapped:
+                status = f"{status}, configured={camera_num}"
+                logger.warning(
+                    "PiCamera probe: remapped configured camera_num=%d to actual Num=%d (available=%s)",
+                    camera_num,
+                    resolved_num,
+                    available_nums,
+                )
+            logger.info("PiCamera probe: camera %d found — %s", resolved_num, status)
             return True, status
 
         # Step 2: fallback — try opening (slower, ensures picamera2 works)
+        resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num, available_cams)
+        if remapped:
+            logger.warning(
+                "PiCamera probe fallback: remapped configured camera_num=%d to actual Num=%d (available=%s)",
+                camera_num,
+                resolved_num,
+                available_nums,
+            )
         logger.warning(
             "PiCamera probe: global_camera_info returned empty, trying to open camera %d directly",
-            camera_num,
+            resolved_num,
         )
-        source = PiCameraSource(camera_num=camera_num)
+        source = PiCameraSource(camera_num=resolved_num)
         try:
             source.open()
             frame = source.capture_frame()
-            return True, f"{frame.resolution[0]}x{frame.resolution[1]}"
+            status = f"{frame.resolution[0]}x{frame.resolution[1]}"
+            if remapped:
+                status = f"{status}, configured={camera_num}, actual={resolved_num}"
+            return True, status
         except Exception as exc:
-            logger.warning("PiCamera probe failed for camera %d: %s", camera_num, exc)
+            logger.warning("PiCamera probe failed for camera %d: %s", resolved_num, exc)
             return False, str(exc)
         finally:
             # Always release resources, even if capture_frame() raised
@@ -581,9 +629,19 @@ class CameraService:
             # Prefer Picamera2 for Arducam when available. This covers Raspberry Pi
             # CSI workflows even if platform model detection is imperfect.
             if _is_picamera2_available():
+                resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num)
+                if remapped:
+                    logger.warning(
+                        "Camera %s remapped configured camera_num=%d to actual Num=%d (available=%s)",
+                        camera_id,
+                        camera_num,
+                        resolved_num,
+                        available_nums,
+                    )
+
                 if not allow_opencv_fallback:
                     return PiCameraSource(
-                        camera_num=camera_num,
+                        camera_num=resolved_num,
                         width=width,
                         height=height,
                         camera_id=camera_id,
@@ -594,7 +652,7 @@ class CameraService:
                     primary_name="picamera2",
                     fallback_name="opencv",
                     primary_factory=lambda: PiCameraSource(
-                        camera_num=camera_num,
+                        camera_num=resolved_num,
                         width=width,
                         height=height,
                         camera_id=camera_id,
