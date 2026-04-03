@@ -92,6 +92,36 @@ function buildOverlayLines(item: DetectionObject, showDecodeInfo: boolean) {
   return [item.bid];
 }
 
+function parseApiError(err: unknown, fallbackMessage: string): { message: string; status?: number } {
+  if (typeof err !== "object" || err === null) {
+    return { message: fallbackMessage };
+  }
+
+  const maybeError = err as {
+    message?: string;
+    response?: {
+      status?: number;
+      data?: unknown;
+    };
+  };
+
+  let detail = "";
+  const responseData = maybeError.response?.data;
+  if (typeof responseData === "string") {
+    detail = responseData;
+  } else if (responseData && typeof responseData === "object" && "detail" in responseData) {
+    const rawDetail = (responseData as { detail?: unknown }).detail;
+    if (typeof rawDetail === "string") {
+      detail = rawDetail;
+    }
+  }
+
+  return {
+    status: maybeError.response?.status,
+    message: detail || maybeError.message || fallbackMessage,
+  };
+}
+
 
 async function getBrowserCameras(): Promise<LiveCameraOption[]> {
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
@@ -410,8 +440,15 @@ export default function LiveDetectionPage() {
           }
         } catch (err) {
           if (!cancelled && previewSessionRef.current === sessionId) {
-            const message = err instanceof Error ? err.message : "即時辨識失敗";
+            const { message, status } = parseApiError(err, "即時辨識失敗");
             setError(message);
+
+            if (selectedCamera.sourceScope === "backend" && (status === 404 || status === 503)) {
+              // Camera is currently unavailable; stop loop to avoid endless 503 spam.
+              cancelled = true;
+              setIsPreviewing(false);
+              break;
+            }
           }
         }
         // Wait only the remaining time so that minCycleMs is the TOTAL period,
@@ -511,6 +548,11 @@ export default function LiveDetectionPage() {
   function startPreview() {
     if (!selectedCameraId || !selectedCamera) {
       setError("請先選擇可用鏡頭");
+      return;
+    }
+
+    if (selectedCamera.sourceScope === "backend" && !selectedCamera.available) {
+      setError(`鏡頭目前不可用：${selectedCamera.status ?? "請檢查相機連線與依賴"}`);
       return;
     }
 
@@ -746,7 +788,12 @@ export default function LiveDetectionPage() {
               </SelectTrigger>
               <SelectContent className="bg-[#0b0c10] border-cyan-900/50 text-slate-300">
                 {cameras.map((camera) => (
-                  <SelectItem key={camera.id} value={camera.id} className="focus:bg-cyan-950 focus:text-cyan-100">
+                  <SelectItem
+                    key={camera.id}
+                    value={camera.id}
+                    disabled={camera.sourceScope === "backend" && !camera.available}
+                    className="focus:bg-cyan-950 focus:text-cyan-100"
+                  >
                     <div className="flex items-center gap-2">
                       {camera.sourceScope === "browser" ? <User size={14} /> : <Camera size={14} />}
                       <span>{camera.label}</span>
