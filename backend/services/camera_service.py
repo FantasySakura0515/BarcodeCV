@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import functools
+import importlib.util
 import logging
+import sys
 import threading
 import time as _time
 from dataclasses import dataclass
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -65,6 +69,125 @@ def _is_streaming(camera_id: str) -> bool:
         return _ACTIVE_STREAMS.get(camera_id, False)
 
 
+@functools.lru_cache(maxsize=1)
+def _is_raspberry_pi() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+
+    model_paths = [
+        "/proc/device-tree/model",
+        "/sys/firmware/devicetree/base/model",
+    ]
+    for model_path in model_paths:
+        try:
+            with open(model_path, "r", encoding="utf-8", errors="ignore") as model_file:
+                if "raspberry pi" in model_file.read().lower():
+                    return True
+        except OSError:
+            pass
+
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as cpuinfo_file:
+            cpuinfo = cpuinfo_file.read().lower()
+            return "raspberry pi" in cpuinfo or "bcm27" in cpuinfo
+    except OSError:
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def _is_picamera2_available() -> bool:
+    return importlib.util.find_spec("picamera2") is not None
+
+
+def _rpi_picamera_dependency_message() -> str:
+    return (
+        "Raspberry Pi Arducam 需要 picamera2/libcamera。"
+        "請在 Pi 上執行: sudo apt update && sudo apt install -y python3-picamera2 python3-libcamera libcamera-apps; "
+        "若使用虛擬環境請執行 scripts/fix_venv_pi.sh 重新建立 --system-site-packages 的 .venv。"
+    )
+
+
+class _FallbackCameraSource(CameraSource):
+    """Try primary backend first, then fallback backend if open() fails."""
+
+    def __init__(
+        self,
+        *,
+        camera_id: str,
+        primary_name: str,
+        fallback_name: str,
+        primary_factory: Callable[[], CameraSource],
+        fallback_factory: Callable[[], CameraSource],
+    ):
+        self._camera_id = camera_id
+        self._primary_name = primary_name
+        self._fallback_name = fallback_name
+        self._primary_factory = primary_factory
+        self._fallback_factory = fallback_factory
+        self._active_source: CameraSource | None = None
+
+    def open(self) -> None:
+        primary = self._primary_factory()
+        try:
+            primary.open()
+            self._active_source = primary
+            return
+        except Exception as primary_exc:
+            try:
+                primary.close()
+            except Exception:
+                pass
+
+            logger.warning(
+                "Camera %s primary backend (%s) failed: %s. Trying fallback (%s).",
+                self._camera_id,
+                self._primary_name,
+                primary_exc,
+                self._fallback_name,
+            )
+
+            fallback = self._fallback_factory()
+            try:
+                fallback.open()
+                self._active_source = fallback
+                return
+            except Exception as fallback_exc:
+                try:
+                    fallback.close()
+                except Exception:
+                    pass
+
+                raise RuntimeError(
+                    f"鏡頭 {self._camera_id} 無法開啟: "
+                    f"{self._primary_name}={primary_exc}; {self._fallback_name}={fallback_exc}"
+                ) from fallback_exc
+
+    def close(self) -> None:
+        if self._active_source is not None:
+            self._active_source.close()
+            self._active_source = None
+
+    def capture_frame(self):
+        source = self._require_active_source()
+        return source.capture_frame()
+
+    def is_open(self) -> bool:
+        return self._active_source is not None and self._active_source.is_open()
+
+    def get_resolution(self) -> tuple[int, int]:
+        source = self._require_active_source()
+        return source.get_resolution()
+
+    def set_resolution(self, width: int, height: int) -> None:
+        source = self._require_active_source()
+        source.set_resolution(width, height)
+
+    def _require_active_source(self) -> CameraSource:
+        if self._active_source is None:
+            raise RuntimeError(f"Camera {self._camera_id} is not open")
+        return self._active_source
+
+
 @dataclass
 class CameraInfo:
     id: str
@@ -82,6 +205,35 @@ class CameraService:
         self._config = config
         self._detection_service = detection_service
 
+    @staticmethod
+    def _extract_picamera_numbers(available_cams: list[dict]) -> list[int]:
+        numbers: list[int] = []
+        for i, info in enumerate(available_cams):
+            raw_num = info.get("Num", i)
+            try:
+                numbers.append(int(raw_num))
+            except (TypeError, ValueError):
+                numbers.append(i)
+        return numbers
+
+    def _resolve_picamera_num(self, configured_num: int, available_cams: list[dict] | None = None) -> tuple[int, bool, list[int]]:
+        cams = available_cams if available_cams is not None else PiCameraSource.available_cameras()
+        available_nums = self._extract_picamera_numbers(cams)
+
+        if not available_nums:
+            return configured_num, False, []
+
+        if configured_num in available_nums:
+            return configured_num, False, available_nums
+
+        if 0 <= configured_num < len(available_nums):
+            # Treat configured_num as ordinal index when actual Num values are
+            # non-contiguous (common on some Arducam/libcamera stacks).
+            resolved_num = available_nums[configured_num]
+            return resolved_num, True, available_nums
+
+        return configured_num, False, available_nums
+
     def list_cameras(self) -> list[CameraInfo]:
         cameras: list[CameraInfo] = []
         seen_ids: set[str] = set()
@@ -92,27 +244,44 @@ class CameraService:
             cameras.append(info)
             seen_ids.add(camera_id)
 
-        for index in range(5):
-            camera_id = f"opencv-{index}"
-            if camera_id in seen_ids:
-                continue
+        if self._should_probe_generic_opencv_slots():
+            for index in range(10):
+                camera_id = f"opencv-{index}"
+                if camera_id in seen_ids:
+                    continue
 
-            available, status = self._probe_opencv(index)
-            if available:
-                cameras.append(
-                    CameraInfo(
-                        id=camera_id,
-                        label=f"USB / OpenCV Camera {index}",
-                        source_type="opencv",
-                        camera_num=index,
-                        width=1280,
-                        height=720,
-                        available=True,
-                        status=status,
+                available, status = self._probe_opencv(index)
+                if available:
+                    cameras.append(
+                        CameraInfo(
+                            id=camera_id,
+                            label=f"USB / OpenCV Camera {index}",
+                            source_type="opencv",
+                            camera_num=index,
+                            width=1280,
+                            height=720,
+                            available=True,
+                            status=status,
+                        )
                     )
-                )
 
         return cameras
+
+    def _should_probe_generic_opencv_slots(self) -> bool:
+        system_cfg = self._config.get("system", {})
+        explicit = system_cfg.get("probe_generic_opencv_cameras")
+        if isinstance(explicit, bool):
+            return explicit
+
+        cameras_cfg = self._config.get("cameras", {})
+        if cameras_cfg:
+            # When the project already defines concrete camera roles
+            # (global/local), avoid extra index probing unless explicitly enabled.
+            return False
+
+        if not _is_raspberry_pi():
+            return True
+        return False
 
     def capture_preview(self, camera_id: str, max_width: int | None = None, quality: int = 70) -> bytes:
         # When MJPEG stream is active, return the most recent cached frame instantly.
@@ -212,6 +381,8 @@ class CameraService:
                                 frame_q.put_nowait(enc.tobytes())
                             except _queue.Full:
                                 pass  # drop frame; client is slow
+            except Exception as exc:
+                logger.error("Failed to initialize or run camera %s: %s", camera_id, exc)
             finally:
                 lock.release()
                 with _ACTIVE_STREAMS_MU:
@@ -314,9 +485,10 @@ class CameraService:
         camera_num = int(cfg.get("camera_num", 0))
         width = int(cfg.get("width", 1280))
         height = int(cfg.get("height", 720))
+        allow_opencv_fallback = bool(cfg.get("allow_opencv_fallback", False))
 
         try:
-            available, status = self._probe_by_type(source_type, camera_num)
+            available, status = self._probe_by_type(source_type, camera_num, allow_opencv_fallback=allow_opencv_fallback)
         except Exception as exc:
             available = False
             status = str(exc)
@@ -332,33 +504,74 @@ class CameraService:
             status=status,
         )
 
-    def _probe_by_type(self, source_type: str, camera_num: int) -> tuple[bool, str | None]:
-        if source_type == "opencv":
+    def _probe_by_type(
+        self,
+        source_type: str,
+        camera_num: int,
+        *,
+        allow_opencv_fallback: bool = False,
+    ) -> tuple[bool, str | None]:
+        if source_type == "arducam":
+            # Prefer Picamera2 whenever available, regardless of platform
+            # detection heuristics. This avoids misrouting CSI cameras to V4L2.
+            if _is_picamera2_available():
+                available_cams = PiCameraSource.available_cameras()
+                picam_ok, picam_status = self._probe_picamera(camera_num, available_cams)
+                if picam_ok:
+                    return True, picam_status
+
+                if allow_opencv_fallback or not _is_raspberry_pi():
+                    opencv_ok, opencv_status = self._probe_opencv(camera_num)
+                    if opencv_ok:
+                        return True, f"opencv fallback: {opencv_status}"
+                    return False, f"picamera={picam_status}; opencv={opencv_status}"
+
+                return False, f"picamera={picam_status}"
+
+            if _is_raspberry_pi():
+                if allow_opencv_fallback:
+                    opencv_ok, opencv_status = self._probe_opencv(camera_num)
+                    if opencv_ok:
+                        return True, f"opencv fallback: {opencv_status}"
+                    return False, f"opencv={opencv_status}"
+                return False, _rpi_picamera_dependency_message()
+
+            return self._probe_opencv(camera_num)
+
+        if source_type == "opencv" or source_type == "arducam":
             return self._probe_opencv(camera_num)
         return self._probe_picamera(camera_num)
 
-    def _probe_picamera(self, camera_num: int) -> tuple[bool, str | None]:
+    def _probe_picamera(self, camera_num: int, available_cams: list[dict] | None = None) -> tuple[bool, str | None]:
         """Probe a PiCamera by first checking global_camera_info, then opening."""
         # Step 1: non-invasive check — picamera2 can list cameras without opening them
-        available_cams = PiCameraSource.available_cameras()
+        if available_cams is None:
+            available_cams = PiCameraSource.available_cameras()
         logger.info("PiCamera probe: available_cameras() = %s", available_cams)
 
         if available_cams:
-            available_nums = [info.get("Num", i) for i, info in enumerate(available_cams)]
-            if camera_num not in available_nums:
+            resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num, available_cams)
+            if resolved_num not in available_nums:
                 msg = f"鏡頭 {camera_num} 未找到 (可用索引: {available_nums})"
                 logger.warning("PiCamera probe: %s", msg)
                 return False, msg
             # Camera index exists — return info without fully opening it
-            info = available_cams[available_nums.index(camera_num)]
+            info = available_cams[available_nums.index(resolved_num)]
             model = info.get("Model", "unknown")
-            status = f"picam{camera_num} ({model})"
-            logger.info("PiCamera probe: camera %d found — %s", camera_num, status)
+            status = f"picam{resolved_num} ({model})"
+            if remapped:
+                status = f"{status}, configured={camera_num}"
+                logger.warning(
+                    "PiCamera probe: remapped configured camera_num=%d to actual Num=%d (available=%s)",
+                    camera_num,
+                    resolved_num,
+                    available_nums,
+                )
+            logger.info("PiCamera probe: camera %d found — %s", resolved_num, status)
             return True, status
 
-        # Step 2: fallback — try opening (slower, ensures picamera2 works)
         logger.warning(
-            "PiCamera probe: global_camera_info returned empty, trying to open camera %d directly",
+            "PiCamera probe: global_camera_info returned empty; trying direct open for camera %d",
             camera_num,
         )
         source = PiCameraSource(camera_num=camera_num)
@@ -367,10 +580,14 @@ class CameraService:
             frame = source.capture_frame()
             return True, f"{frame.resolution[0]}x{frame.resolution[1]}"
         except Exception as exc:
-            logger.warning("PiCamera probe failed for camera %d: %s", camera_num, exc)
-            return False, str(exc)
+            error_message = str(exc)
+            if error_message == "list index out of range":
+                error_message = (
+                    "picamera2 無法開啟指定鏡頭；通常代表目前系統未偵測到任何 CSI camera。"
+                )
+            logger.warning("PiCamera probe failed for camera %d: %s", camera_num, error_message)
+            return False, error_message
         finally:
-            # Always release resources, even if capture_frame() raised
             try:
                 source.close()
             except Exception:
@@ -400,8 +617,69 @@ class CameraService:
         camera_num = int(cfg.get("camera_num", 0))
         width = int(cfg.get("width", 1280))
         height = int(cfg.get("height", 720))
+        allow_opencv_fallback = bool(cfg.get("allow_opencv_fallback", False))
 
-        if source_type == "opencv":
+        if source_type == "arducam":
+            # Prefer Picamera2 for Arducam when available. This covers Raspberry Pi
+            # CSI workflows even if platform model detection is imperfect.
+            if _is_picamera2_available():
+                available_cams = PiCameraSource.available_cameras()
+                resolved_num = camera_num
+                if available_cams:
+                    resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num, available_cams)
+                    if remapped:
+                        logger.warning(
+                            "Camera %s remapped configured camera_num=%d to actual Num=%d (available=%s)",
+                            camera_id,
+                            camera_num,
+                            resolved_num,
+                            available_nums,
+                        )
+                else:
+                    logger.warning(
+                        "Camera %s: picamera2 is importable but camera enumeration returned empty; "
+                        "trying direct open on configured camera_num=%d.",
+                        camera_id,
+                        camera_num,
+                    )
+
+                if not allow_opencv_fallback:
+                    return PiCameraSource(
+                        camera_num=resolved_num,
+                        width=width,
+                        height=height,
+                        camera_id=camera_id,
+                    )
+
+                return _FallbackCameraSource(
+                    camera_id=camera_id,
+                    primary_name="picamera2",
+                    fallback_name="opencv",
+                    primary_factory=lambda: PiCameraSource(
+                        camera_num=resolved_num,
+                        width=width,
+                        height=height,
+                        camera_id=camera_id,
+                    ),
+                    fallback_factory=lambda: OpenCVCameraSource(
+                        camera_num=camera_num,
+                        width=width,
+                        height=height,
+                        camera_id=camera_id,
+                    ),
+                )
+
+            if _is_raspberry_pi() and not allow_opencv_fallback:
+                raise RuntimeError(_rpi_picamera_dependency_message())
+
+            return OpenCVCameraSource(
+                camera_num=camera_num,
+                width=width,
+                height=height,
+                camera_id=camera_id,
+            )
+
+        if source_type == "opencv" or source_type == "arducam":
             return OpenCVCameraSource(
                 camera_num=camera_num,
                 width=width,

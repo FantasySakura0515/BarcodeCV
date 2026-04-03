@@ -41,16 +41,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       }
     >
       <Sidebar collapsible="icon" className="border-r bg-background">
-        <SidebarHeader>
+        <SidebarHeader className="border-b border-[#334155]/50 bg-[#0b0c10]">
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton size="lg" className="pointer-events-none mb-2 mt-2">
-                <div className="flex aspect-square size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
-                  <BoundingBox size={20} weight="duotone" />
+                <div className="flex aspect-square size-10 items-center justify-center rounded-[0.25rem] bg-[#1a202c] text-[#00f0ff] border border-[#00f0ff]/30 shadow-[0_0_12px_#00f0ff30]">
+                  <BoundingBox size={24} weight="duotone" />
                 </div>
-                <div className="grid flex-1 text-left text-sm leading-tight group-data-[collapsible=icon]:hidden">
-                  <span className="truncate font-semibold tracking-tight text-foreground">BarcodeCV</span>
-                  <span className="truncate text-xs text-muted-foreground">營運主控台</span>
+                <div className="grid flex-1 text-left text-sm leading-tight group-data-[collapsible=icon]:hidden ml-1">
+                  <span className="truncate font-black tracking-wider text-white text-lg drop-shadow-[0_0_2px_#00f0ff]">BarcodeCV</span>
+                  <span className="truncate text-[10px] font-mono text-[#00f0ff]/80 font-bold uppercase tracking-widest">VISION SYNC</span>
                 </div>
               </SidebarMenuButton>
             </SidebarMenuItem>
@@ -59,16 +59,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <SidebarContent>
           <SidebarGroup>
-            <SidebarGroupLabel className="group-data-[collapsible=icon]:opacity-0 font-medium">導覽</SidebarGroupLabel>
+            <SidebarGroupLabel className="group-data-[collapsible=icon]:opacity-0 font-mono text-xs uppercase tracking-widest text-[#00f0ff]/70">系統導航</SidebarGroupLabel>
             <SidebarMenu>
               {navigation.map(({ href, label, icon: Icon }) => {
                 const active = pathname === href || pathname.startsWith(`${href}/`);
                 return (
                   <SidebarMenuItem key={href}>
-                    <SidebarMenuButton asChild isActive={active} tooltip={label} className="transition-colors duration-150">
+                    <SidebarMenuButton 
+                      asChild 
+                      isActive={active} 
+                      tooltip={label} 
+                      className={cn(
+                        "transition-all duration-200 hover:bg-[#1a202c] hover:text-[#00f0ff]",
+                        active && "bg-[#1a202c] text-[#00f0ff] relative before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:h-2/3 before:w-1 before:bg-[#00f0ff] before:rounded-r-md before:shadow-[0_0_8px_#00f0ff]"
+                      )}
+                    >
                       <Link href={href} className="flex w-full items-center gap-3">
-                        <Icon size={18} weight={active ? "fill" : "regular"} className={cn(active ? "text-primary" : "text-muted-foreground")} />
-                        <span className="truncate font-medium">{label}</span>
+                        <Icon size={20} weight={active ? "duotone" : "regular"} className={cn(active ? "text-[#00f0ff]" : "text-muted-foreground")} />
+                        <span className="truncate font-medium tracking-wide">{label}</span>
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
@@ -81,16 +89,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <SidebarRail />
 
-      <SidebarInset className="bg-muted/30">
-        <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background px-4 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-14 lg:px-6">
+      <SidebarInset className="bg-[#050508] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-[#161b22]/30 via-[#050508] to-[#050508]">
+        <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b border-[#334155]/50 bg-[#0b0c10]/80 backdrop-blur-md px-4 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-14 lg:px-6 shadow-sm shadow-[#00f0ff]/5">
           <div className="flex flex-1 items-center gap-3">
-            <SidebarTrigger className="-ml-1" />
-            <div className="h-4 w-px bg-border" />
-            <p className="text-xs text-muted-foreground">正式環境營運工作區</p>
+            <SidebarTrigger className="-ml-1 text-muted-foreground hover:text-[#00f0ff] transition-colors" />
+            <div className="h-4 w-[1px] bg-[#334155]" />
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00ff66] opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-[#00ff66]"></span>
+              </span>
+              <p className="text-xs font-mono text-muted-foreground tracking-wider uppercase">SYSTEM ONLINE : CORE READY</p>
+            </div>
           </div>
         </header>
 
-        <main className="mx-auto w-full max-w-7xl flex-1 space-y-6 p-4 md:p-6 lg:p-8">{children}</main>
+        <main className="mx-auto w-full max-w-7xl flex-1 p-4 md:p-6 lg:p-8 animate-in fade-in duration-500">{children}</main>
       </SidebarInset>
     </SidebarProvider>
   );

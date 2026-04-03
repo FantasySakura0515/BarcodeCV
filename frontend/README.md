@@ -1,36 +1,42 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+﻿# Frontend Console
 
-## Getting Started
+`frontend/` 是 BarcodeCV 唯一支援的前端工作台。
 
-First, run the development server:
+## 責任範圍
+
+這個 workspace 負責：
+- dashboard 與操作頁面
+- 瀏覽器端互動流程與狀態管理
+- `src/app/api/*` 的 BFF 代理層
+- 前端 lint 與 production build 驗證
+
+這個 workspace 不負責：
+- 偵測與解碼演算法
+- 資料持久化
+- 相機商業邏輯
+
+## 常用指令
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run verify
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+預設網址：
+- `http://localhost:3000`
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 環境變數
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+需要時建立 `frontend/.env.local`。
 
-## Learn More
+常用設定：
+- `BACKEND_API_BASE_URL=http://127.0.0.1:8000/api`
+- `FRONTEND_INTERNAL_API_BASE_URL=http://127.0.0.1:3000/api`
 
-To learn more about Next.js, take a look at the following resources:
+## 交付標準
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+交付前至少確認：
+- `npm run verify` 通過
+- 使用者可見頁面沒有 placeholder、亂碼或 boilerplate 文字
+- 新增路由與元件都有明確責任邊界

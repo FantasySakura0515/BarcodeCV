@@ -18,7 +18,13 @@ pip install -r requirements.txt
 # Verify cameras
 echo ""
 echo "=== Detecting cameras ==="
-libcamera-hello --list-cameras 2>/dev/null || echo "No CSI cameras detected via libcamera"
+if command -v rpicam-hello >/dev/null 2>&1; then
+    rpicam-hello --list-cameras 2>/dev/null || echo "No CSI cameras detected via rpicam"
+elif command -v libcamera-hello >/dev/null 2>&1; then
+    libcamera-hello --list-cameras 2>/dev/null || echo "No CSI cameras detected via libcamera"
+else
+    echo "No rpicam-hello/libcamera-hello command found"
+fi
 v4l2-ctl --list-devices 2>/dev/null || echo "No USB cameras detected via v4l2"
 
 # Create data directories

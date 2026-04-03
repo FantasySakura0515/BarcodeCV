@@ -11,4 +11,10 @@ sudo apt install -y \
     python3-libcamera \
     v4l-utils
 
+if apt-cache show rpicam-apps >/dev/null 2>&1; then
+    sudo apt install -y rpicam-apps
+else
+    sudo apt install -y libcamera-apps
+fi
+
 echo "=== System dependencies installed ==="

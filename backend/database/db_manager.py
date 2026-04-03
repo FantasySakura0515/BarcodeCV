@@ -5,6 +5,9 @@ from pathlib import Path
 logger = logging.getLogger("barcodecv.database")
 
 SCHEMA_SQL = """
+-- ============================================================
+-- Legacy tables (kept for CLI/pipeline backward compatibility)
+-- ============================================================
 CREATE TABLE IF NOT EXISTS scan_sessions (
     id              TEXT PRIMARY KEY,
     started_at      TEXT NOT NULL,
@@ -91,6 +94,148 @@ CREATE TABLE IF NOT EXISTS model_registry (
 
 CREATE INDEX IF NOT EXISTS idx_model_registry_type ON model_registry(model_type);
 CREATE INDEX IF NOT EXISTS idx_model_registry_active ON model_registry(is_active);
+
+-- ============================================================
+-- v1.0 business schema (docs/database.md)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS customers (
+    id          INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
+    name        TEXT     NOT NULL,
+    code        TEXT     NOT NULL,
+    description TEXT,
+    email       TEXT,
+    phone       TEXT,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at  DATETIME,
+    CONSTRAINT uq_customers_code  UNIQUE (code),
+    CONSTRAINT uq_customers_email UNIQUE (email)
+);
+
+CREATE TABLE IF NOT EXISTS devices (
+    id           INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
+    name         TEXT     NOT NULL,
+    code         TEXT     NOT NULL,
+    type         TEXT     NOT NULL,
+    location     TEXT,
+    is_active    INTEGER  NOT NULL DEFAULT 1,
+    is_deletable INTEGER  NOT NULL DEFAULT 1,
+    last_seen_at DATETIME,
+    created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at   DATETIME,
+    CONSTRAINT uq_devices_code      UNIQUE (code),
+    CONSTRAINT ck_devices_is_active CHECK (is_active IN (0, 1)),
+    CONSTRAINT ck_devices_deletable CHECK (is_deletable IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS batchs (
+    id          INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER  NOT NULL,
+    name        TEXT     NOT NULL,
+    code        TEXT     NOT NULL,
+    description TEXT,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at  DATETIME,
+    CONSTRAINT uq_batchs_code UNIQUE (code),
+    CONSTRAINT fk_batchs_customer
+        FOREIGN KEY (customer_id)
+        REFERENCES customers (id)
+        ON DELETE RESTRICT
+        ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id              INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
+    batchs_id       INTEGER  NOT NULL,
+    code            TEXT     NOT NULL,
+    status          TEXT     NOT NULL DEFAULT 'pending',
+    data_url        TEXT,
+    box_expected    TEXT,
+    matrix_expected TEXT,
+    box_detected    TEXT,
+    matrix_detected TEXT,
+    remark          TEXT,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at      DATETIME,
+    CONSTRAINT uq_tasks_code UNIQUE (code),
+    CONSTRAINT ck_tasks_status CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+    CONSTRAINT fk_tasks_batch
+        FOREIGN KEY (batchs_id)
+        REFERENCES batchs (id)
+        ON DELETE RESTRICT
+        ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    id            INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
+    name          TEXT     NOT NULL,
+    description   TEXT,
+    setting_key   TEXT     NOT NULL,
+    setting_value TEXT     NOT NULL,
+    is_deletable  INTEGER  NOT NULL DEFAULT 1,
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at    DATETIME,
+    CONSTRAINT uq_settings_key UNIQUE (setting_key),
+    CONSTRAINT ck_settings_deletable CHECK (is_deletable IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS idx_customers_deleted ON customers (deleted_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_code ON customers (code);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_email ON customers (email);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_code ON devices (code);
+CREATE INDEX IF NOT EXISTS idx_devices_active ON devices (is_active);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_batchs_code ON batchs (code);
+CREATE INDEX IF NOT EXISTS idx_batchs_customer_id ON batchs (customer_id);
+CREATE INDEX IF NOT EXISTS idx_batchs_deleted ON batchs (deleted_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_code ON tasks (code);
+CREATE INDEX IF NOT EXISTS idx_tasks_batchs_id ON tasks (batchs_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);
+CREATE INDEX IF NOT EXISTS idx_tasks_deleted ON tasks (deleted_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_key ON settings (setting_key);
+
+CREATE TRIGGER IF NOT EXISTS trg_customers_updated_at
+AFTER UPDATE ON customers
+FOR EACH ROW
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE customers SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_devices_updated_at
+AFTER UPDATE ON devices
+FOR EACH ROW
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE devices SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_batchs_updated_at
+AFTER UPDATE ON batchs
+FOR EACH ROW
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE batchs SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_tasks_updated_at
+AFTER UPDATE ON tasks
+FOR EACH ROW
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE tasks SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_settings_updated_at
+AFTER UPDATE ON settings
+FOR EACH ROW
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE settings SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id;
+END;
 """
 
 
@@ -117,6 +262,7 @@ class DatabaseManager:
             raise RuntimeError("Not connected. Call connect() first.")
         self._conn.executescript(SCHEMA_SQL)
         self._ensure_column("scan_records", "remark", "TEXT")
+        self._ensure_column("tasks", "remark", "TEXT")
         self._conn.commit()
         logger.info("Database schema initialized")
 
