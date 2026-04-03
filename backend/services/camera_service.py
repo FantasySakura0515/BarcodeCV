@@ -518,11 +518,17 @@ class CameraService:
                 available_cams = PiCameraSource.available_cameras()
                 if not available_cams:
                     # picamera2 is installed but no CSI camera appears in libcamera.
-                    # This commonly means USB/UVC mode or camera stack misconfiguration.
-                    opencv_ok, opencv_status = self._probe_opencv(camera_num)
-                    if opencv_ok:
-                        return True, f"opencv fallback (no picamera cameras): {opencv_status}"
-                    return False, f"picamera=no cameras; opencv={opencv_status}"
+                    # This can be CSI stack misconfiguration. Only use OpenCV
+                    # fallback when explicitly enabled (USB/UVC scenarios).
+                    if allow_opencv_fallback or not _is_raspberry_pi():
+                        opencv_ok, opencv_status = self._probe_opencv(camera_num)
+                        if opencv_ok:
+                            return True, f"opencv fallback (no picamera cameras): {opencv_status}"
+                        return False, f"picamera=no cameras; opencv={opencv_status}"
+                    return False, (
+                        "picamera2 可用但未偵測到 CSI 鏡頭；"
+                        "請先檢查 CSI 排線/overlay。若是 USB/UVC，請將 allow_opencv_fallback 設為 true。"
+                    )
 
                 picam_ok, picam_status = self._probe_picamera(camera_num, available_cams)
                 if picam_ok:
@@ -617,15 +623,20 @@ class CameraService:
             if _is_picamera2_available():
                 available_cams = PiCameraSource.available_cameras()
                 if not available_cams:
-                    logger.warning(
-                        "Camera %s: picamera2 is importable but no cameras reported; using OpenCV fallback.",
-                        camera_id,
-                    )
-                    return OpenCVCameraSource(
-                        camera_num=camera_num,
-                        width=width,
-                        height=height,
-                        camera_id=camera_id,
+                    if allow_opencv_fallback or not _is_raspberry_pi():
+                        logger.warning(
+                            "Camera %s: picamera2 is importable but no cameras reported; using explicit OpenCV fallback.",
+                            camera_id,
+                        )
+                        return OpenCVCameraSource(
+                            camera_num=camera_num,
+                            width=width,
+                            height=height,
+                            camera_id=camera_id,
+                        )
+                    raise RuntimeError(
+                        "picamera2 可用但未偵測到 CSI 鏡頭；請檢查 CSI 排線/overlay。"
+                        "若是 USB/UVC Arducam，請將 allow_opencv_fallback 設為 true。"
                     )
 
                 resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num, available_cams)

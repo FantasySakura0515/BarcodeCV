@@ -364,6 +364,7 @@ def debug_cameras() -> dict:
 
     if isinstance(diagnostics.get("global_camera_info"), list) and not diagnostics.get("global_camera_info"):
         suggested_fixes.append("libcamera-hello --list-cameras  # 若為空，請檢查 CSI 排線與 /boot/firmware/config.txt")
+        suggested_fixes.append("sudo raspi-config  # Interface Options -> Camera；重開機後再測")
         suggested_fixes.append(
             "若使用 USB/UVC Arducam，請在 config/default.yaml 將 cameras.*.allow_opencv_fallback 設為 true"
         )
