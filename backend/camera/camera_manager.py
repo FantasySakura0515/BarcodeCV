@@ -7,58 +7,39 @@ logger = logging.getLogger("barcodecv.camera")
 
 
 class CameraManager:
-    """Manages dual CSI cameras for Global-to-Local strategy."""
+    """Manages the single Picamera2 source used by the CamArray flow."""
 
-    def __init__(self, global_camera: CameraSource, local_camera: CameraSource):
-        self._global = global_camera
-        self._local = local_camera
+    def __init__(self, camera: CameraSource):
+        self._camera = camera
 
     @staticmethod
     def from_config(config: dict) -> "CameraManager":
         """Create CameraManager from YAML config."""
-        global_cfg = config["cameras"]["global"]
-        local_cfg = config["cameras"]["local"]
+        camera_cfg = config["cameras"]["main"]
 
-        global_cam = PiCameraSource(
-            camera_num=global_cfg["camera_num"],
-            width=global_cfg["width"],
-            height=global_cfg["height"],
-            camera_id="global",
+        camera = PiCameraSource(
+            camera_num=camera_cfg["camera_num"],
+            width=camera_cfg["width"],
+            height=camera_cfg["height"],
+            camera_id="main",
         )
-        local_cam = PiCameraSource(
-            camera_num=local_cfg["camera_num"],
-            width=local_cfg["width"],
-            height=local_cfg["height"],
-            camera_id="local",
-        )
-
-        return CameraManager(global_camera=global_cam, local_camera=local_cam)
+        return CameraManager(camera=camera)
 
     def open_all(self) -> None:
-        self._global.open()
-        self._local.open()
-        logger.info("All cameras opened")
+        self._camera.open()
+        logger.info("Camera opened")
 
     def close_all(self) -> None:
-        self._global.close()
-        self._local.close()
-        logger.info("All cameras closed")
+        self._camera.close()
+        logger.info("Camera closed")
 
-    def capture_global(self) -> Frame:
-        """Capture a wide-angle frame for DataMatrix detection."""
-        return self._global.capture_frame()
-
-    def capture_local(self) -> Frame:
-        """Capture a high-resolution frame for DataMatrix decoding."""
-        return self._local.capture_frame()
+    def capture(self) -> Frame:
+        """Capture a frame from the aggregated CamArray device."""
+        return self._camera.capture_frame()
 
     @property
-    def global_camera(self) -> CameraSource:
-        return self._global
-
-    @property
-    def local_camera(self) -> CameraSource:
-        return self._local
+    def camera(self) -> CameraSource:
+        return self._camera
 
     def __enter__(self):
         self.open_all()

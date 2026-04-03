@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Third-party vendor bundles (generated/minified, not authored in repo).
+    "public/dynamsoft/**",
   ]),
 ]);
 

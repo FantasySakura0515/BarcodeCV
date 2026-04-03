@@ -1,6 +1,6 @@
 ﻿# BarcodeCV
 
-BarcodeCV 是一套以 Raspberry Pi 與雙鏡頭為核心的 DataMatrix 掃描系統，包含：
+BarcodeCV 是一套以 Raspberry Pi 5 與 Arducam CamArray 單聚合鏡頭為核心的 DataMatrix 掃描系統，包含：
 - FastAPI 後端
 - Next.js 前端工作台
 - SQLite 結果持久化

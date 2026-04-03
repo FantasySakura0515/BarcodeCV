@@ -39,9 +39,9 @@ const PERFORMANCE_PROFILES: Record<Exclude<PerformanceMode, "auto">, {
 };
 
 const PERFORMANCE_MODE_LABELS: Record<Exclude<PerformanceMode, "auto">, string> = {
-  low:      "低耗能",
-  balanced: "平衡",
-  high:     "高效能",
+  low:      "low power",
+  balanced: "balanced",
+  high:     "high performance",
 };
 
 interface SurfaceSize {
@@ -139,7 +139,7 @@ async function getBrowserCameras(): Promise<LiveCameraOption[]> {
     const videoInputs = devices.filter((device) => device.kind === "videoinput");
     return videoInputs.map((device, index) => ({
       id: `browser-${device.deviceId || index}`,
-      label: device.label || `瀏覽器鏡頭 ${index + 1}`,
+      label: device.label || `Browser Camera ${index + 1}`,
       sourceType: "browser" as CameraInfo["sourceType"],
       sourceScope: "browser" as const,
       deviceId: device.deviceId,
@@ -147,7 +147,7 @@ async function getBrowserCameras(): Promise<LiveCameraOption[]> {
       width: 1280,
       height: 720,
       available: true,
-      status: device.label ? "準備就緒" : "請授權鏡頭存取權限",
+      status: device.label ? "ready" : "please grant camera access",
     }));
   } catch {
     return [];
@@ -201,6 +201,68 @@ export default function LiveDetectionPage() {
     () => cameras.find((item) => item.id === selectedCameraId) ?? null,
     [cameras, selectedCameraId],
   );
+
+  const selectedCameraKindLabel = useMemo(() => {
+    if (!selectedCamera) {
+      return "";
+    }
+    if (selectedCamera.sourceScope === "backend") {
+      if (selectedCamera.id === "main") {
+        return "CamArray Main (Aggregated)";
+      }
+      return `Backend ${selectedCamera.sourceType}`;
+    }
+    return "Browser Device";
+  }, [selectedCamera]);
+
+  const selectedCameraConnection = useMemo(() => {
+    if (!selectedCamera) {
+      return {
+        online: false,
+        label: "UNKNOWN",
+        detail: "not selected",
+        dotClass: "bg-slate-500",
+        textClass: "text-slate-500",
+      };
+    }
+
+    if (selectedCamera.sourceScope === "backend") {
+      if (selectedCamera.available) {
+        return {
+          online: true,
+          label: "BACKEND READY",
+          detail: selectedCamera.status ?? "backend camera available",
+          dotClass: "bg-cyan-400",
+          textClass: "text-cyan-400",
+        };
+      }
+      return {
+        online: false,
+        label: "BACKEND OFFLINE",
+        detail: selectedCamera.status ?? "backend camera unavailable",
+        dotClass: "bg-red-500",
+        textClass: "text-red-500",
+      };
+    }
+
+    if (browserStream) {
+      return {
+        online: true,
+        label: "BROWSER LIVE",
+        detail: "streaming browser device camera",
+        dotClass: "bg-emerald-400",
+        textClass: "text-emerald-400",
+      };
+    }
+
+    return {
+      online: true,
+      label: "BROWSER READY",
+      detail: selectedCamera.status ?? "waiting to start preview or browser permission",
+      dotClass: "bg-cyan-400",
+      textClass: "text-cyan-400",
+    };
+  }, [browserStream, selectedCamera]);
 
   /**
    * Keep SSR and the first client render deterministic. Resolve the real
@@ -276,10 +338,10 @@ export default function LiveDetectionPage() {
       const browserItems: LiveCameraOption[] = Array.isArray(rawBrowser) ? rawBrowser : [];
 
       if (backendResult.status === "rejected") {
-        const msg = backendResult.reason instanceof Error ? backendResult.reason.message : "無法連線到後端";
-        setError(`後端鏡頭載入失敗：${msg}`);
+        const msg = backendResult.reason instanceof Error ? backendResult.reason.message : "cannot connect to backend";
+        setError(`backend camera load failed: ${msg}`);
       } else if (!Array.isArray(rawBackend)) {
-        setError(`後端回應格式異常（非陣列）：${JSON.stringify(rawBackend)?.slice(0, 120)}`);
+        setError(`unexpected backend response format (not an array): ${JSON.stringify(rawBackend)?.slice(0, 120)}`);
       }
 
       const items: LiveCameraOption[] = [
@@ -299,7 +361,7 @@ export default function LiveDetectionPage() {
 
       setSelectedCameraId(preferred?.id ?? "");
     } catch (err) {
-      const message = err instanceof Error ? err.message : "無法取得鏡頭清單";
+      const message = err instanceof Error ? err.message : "failed to get camera list";
       setError(message);
     } finally {
       setIsLoadingCameras(false);
@@ -308,7 +370,7 @@ export default function LiveDetectionPage() {
 
   const previewFromBrowserCamera = useCallback(async () => {
     if (!selectedCamera) {
-      throw new Error("請先選擇可用鏡頭");
+      throw new Error("please select an available camera");
     }
 
     const snapshot = await captureBrowserSnapshot(
@@ -440,7 +502,7 @@ export default function LiveDetectionPage() {
           }
         } catch (err) {
           if (!cancelled && previewSessionRef.current === sessionId) {
-            const { message, status } = parseApiError(err, "即時辨識失敗");
+            const { message, status } = parseApiError(err, "live detection failed");
             setError(message);
 
             if (selectedCamera.sourceScope === "backend" && (status === 404 || status === 503)) {
@@ -547,12 +609,12 @@ export default function LiveDetectionPage() {
 
   function startPreview() {
     if (!selectedCameraId || !selectedCamera) {
-      setError("請先選擇可用鏡頭");
+      setError("please select an available camera");
       return;
     }
 
     if (selectedCamera.sourceScope === "backend" && !selectedCamera.available) {
-      setError(`鏡頭目前不可用：${selectedCamera.status ?? "請檢查相機連線與依賴"}`);
+      setError(`camera is currently unavailable: ${selectedCamera.status ?? "check camera connection and dependencies"}`);
       return;
     }
 
@@ -797,6 +859,11 @@ export default function LiveDetectionPage() {
                     <div className="flex items-center gap-2">
                       {camera.sourceScope === "browser" ? <User size={14} /> : <Camera size={14} />}
                       <span>{camera.label}</span>
+                      {camera.sourceScope === "backend" && camera.id === "main" ? (
+                        <Badge variant="outline" className="ml-1 text-[10px] border-cyan-800/60 text-cyan-300">
+                          CamArray
+                        </Badge>
+                      ) : null}
                       {!camera.available && <Badge variant="outline" className="ml-2 text-[10px] border-red-900/50 text-red-500">外部占用</Badge>}
                     </div>
                   </SelectItem>
@@ -942,16 +1009,46 @@ export default function LiveDetectionPage() {
                       <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80 mb-1">
                         選擇的鏡頭
                       </p>
-                      <p className="text-sm font-medium text-cyan-50">
-                        {selectedCamera?.label || selectedCameraId}
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-cyan-50">
+                          {selectedCamera?.label || selectedCameraId}
+                        </p>
+                        {selectedCamera?.sourceScope === "backend" && selectedCamera.id === "main" ? (
+                          <Badge variant="outline" className="text-[10px] border-cyan-800/60 text-cyan-300">
+                            CamArray
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-cyan-900/20 bg-black/50 p-3">
+                      <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80 mb-1">
+                        鏡頭類型
+                      </p>
+                      <p className="text-xs font-medium text-cyan-200">{selectedCameraKindLabel}</p>
+                    </div>
+
+                    <div className="rounded-lg border border-cyan-900/20 bg-black/50 p-3">
+                      <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80 mb-1">
+                        解析度
+                      </p>
+                      <p className="text-xs font-medium text-cyan-200">
+                        {selectedCameraSurface?.width && selectedCameraSurface.height
+                          ? `${selectedCameraSurface.width} x ${selectedCameraSurface.height}`
+                          : `${selectedCamera.width} x ${selectedCamera.height}`}
                       </p>
                     </div>
 
-                    <div className="rounded-lg border border-cyan-900/20 bg-black/50 p-3 flexItems-center justify-between">
-                       <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80">連線狀態</p>
-                       <span className="flex items-center gap-1.5 text-xs font-medium text-cyan-400">
-                          <span className="inline-block h-1.5 w-1.5 rounded-full bg-cyan-400"></span>
-                          ONLINE
+                    <div className="rounded-lg border border-cyan-900/20 bg-black/50 p-3 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80">連線狀態</p>
+                        <p className="mt-1 text-[11px] leading-relaxed text-slate-400 break-words">
+                          {selectedCameraConnection.detail}
+                        </p>
+                      </div>
+                       <span className={`shrink-0 flex items-center gap-1.5 text-xs font-medium ${selectedCameraConnection.textClass}`}>
+                          <span className={`inline-block h-1.5 w-1.5 rounded-full ${selectedCameraConnection.dotClass}`}></span>
+                          {selectedCameraConnection.label}
                        </span>
                     </div>
                   </div>

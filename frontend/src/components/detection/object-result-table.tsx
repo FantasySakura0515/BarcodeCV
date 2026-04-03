@@ -3,7 +3,6 @@
 import Link from "next/link";
 
 import { ModelBadge } from "@/components/common/model-badge";
-import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import type { DetectionObject } from "@/types";

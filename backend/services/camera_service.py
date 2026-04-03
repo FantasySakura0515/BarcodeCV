@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import functools
-import importlib.util
 import logging
-import sys
 import threading
 import time as _time
 from dataclasses import dataclass
@@ -15,6 +12,7 @@ import numpy as np
 from ..camera.base import CameraSource
 from ..camera.opencv_source import OpenCVCameraSource
 from ..camera.picamera_source import PiCameraSource
+from ..utils.platform_utils import _is_picamera2_available, _is_raspberry_pi
 from .detection_service import DetectionPreviewResult, DetectionRunResult, DetectionService
 
 logger = logging.getLogger("barcodecv.camera")
@@ -68,35 +66,6 @@ def _is_streaming(camera_id: str) -> bool:
     with _ACTIVE_STREAMS_MU:
         return _ACTIVE_STREAMS.get(camera_id, False)
 
-
-@functools.lru_cache(maxsize=1)
-def _is_raspberry_pi() -> bool:
-    if not sys.platform.startswith("linux"):
-        return False
-
-    model_paths = [
-        "/proc/device-tree/model",
-        "/sys/firmware/devicetree/base/model",
-    ]
-    for model_path in model_paths:
-        try:
-            with open(model_path, "r", encoding="utf-8", errors="ignore") as model_file:
-                if "raspberry pi" in model_file.read().lower():
-                    return True
-        except OSError:
-            pass
-
-    try:
-        with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as cpuinfo_file:
-            cpuinfo = cpuinfo_file.read().lower()
-            return "raspberry pi" in cpuinfo or "bcm27" in cpuinfo
-    except OSError:
-        return False
-
-
-@functools.lru_cache(maxsize=1)
-def _is_picamera2_available() -> bool:
-    return importlib.util.find_spec("picamera2") is not None
 
 
 def _rpi_picamera_dependency_message() -> str:
@@ -275,8 +244,8 @@ class CameraService:
 
         cameras_cfg = self._config.get("cameras", {})
         if cameras_cfg:
-            # When the project already defines concrete camera roles
-            # (global/local), avoid extra index probing unless explicitly enabled.
+            # When the project already defines concrete camera roles, avoid extra
+            # index probing unless explicitly enabled.
             return False
 
         if not _is_raspberry_pi():
@@ -493,9 +462,13 @@ class CameraService:
             available = False
             status = str(exc)
 
+        label = f"{role.title()} Camera"
+        if camera_id == "main" and source_type == "arducam":
+            label = "Main CamArray Camera"
+
         return CameraInfo(
             id=camera_id,
-            label=f"{role.title()} Camera",
+            label=label,
             source_type=source_type,
             camera_num=camera_num,
             width=width,

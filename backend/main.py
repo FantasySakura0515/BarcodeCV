@@ -1,4 +1,4 @@
-"""BarcodeCV - Dual-camera DataMatrix scanner for Raspberry Pi 5.
+"""BarcodeCV - Single-camera DataMatrix scanner for Raspberry Pi 5 CamArray.
 
 Usage:
     python -m backend.main --mode single                    # One-shot scan
@@ -13,6 +13,7 @@ import sys
 
 from .calibration.distance_calibrator import DistanceCalibrator
 from .calibration.focus_scorer import FocusScorer
+from .camera.camarray_guard import run_camarray_startup_check
 from .camera.camera_manager import CameraManager
 from .database.db_manager import DatabaseManager
 from .database.repository import BoxRepository, ScanRepository
@@ -67,6 +68,23 @@ def main():
         log_level=config["system"]["log_level"],
         log_file=config["system"].get("log_file"),
     )
+
+    try:
+        camarray_report = run_camarray_startup_check(config)
+        for warning in camarray_report.get("warnings", []):
+            logger.warning("CamArray check: %s", warning)
+        if camarray_report.get("checked") and camarray_report.get("ready"):
+            logger.info(
+                "CamArray check passed (camera_num=%s, available=%s, mode=%s, channels=%s)",
+                camarray_report.get("configured_camera_num"),
+                camarray_report.get("available_nums"),
+                camarray_report.get("mode"),
+                camarray_report.get("active_channels"),
+            )
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        sys.exit(2)
+
     logger.info("BarcodeCV starting in '%s' mode", config["system"]["mode"])
 
     mode = config["system"]["mode"]
@@ -83,7 +101,7 @@ def main():
 
 
 def _run_preview(config: dict):
-    """Live dual-camera preview with box/DataMatrix overlay. Press 'q' to quit."""
+    """Live single-camera preview with box/DataMatrix overlay. Press 'q' to quit."""
     import logging
 
     import cv2
@@ -102,37 +120,21 @@ def _run_preview(config: dict):
         logger.info("Preview started — press 'q' to quit, 's' to scan")
 
         while True:
-            global_frame = camera_manager.capture_global()
-            local_frame = camera_manager.capture_local()
+            frame = camera_manager.capture()
+            display_image = frame.image.copy()
 
-            global_img = global_frame.image.copy()
-            local_img = local_frame.image.copy()
-
-            # Box detection overlay on global image (fast, no scanning)
             if box_detector is not None:
-                processed = preprocess_for_detection(global_frame.image)
+                processed = preprocess_for_detection(frame.image)
                 boxes = box_detector.detect(processed)
                 for i, box in enumerate(boxes):
                     x1, y1, x2, y2 = box.bbox
-                    cv2.rectangle(global_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(global_img, f"Box {i+1}", (x1, y1 - 8),
+                    cv2.rectangle(display_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(display_image, f"Box {i+1}", (x1, y1 - 8),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            # Labels
-            cv2.putText(global_img, "Global (CAM0)", (10, 30),
+            cv2.putText(display_image, "Main CamArray (CAM0)", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-            cv2.putText(local_img, "Local (CAM1)", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-
-            # Resize both to same height for side-by-side display
-            h = min(global_img.shape[0], local_img.shape[0], 540)
-            g_w = int(global_img.shape[1] * h / global_img.shape[0])
-            l_w = int(local_img.shape[1] * h / local_img.shape[0])
-            global_resized = cv2.resize(global_img, (g_w, h))
-            local_resized = cv2.resize(local_img, (l_w, h))
-
-            combined = cv2.hconcat([global_resized, local_resized])
-            cv2.imshow("BarcodeCV Preview", combined)
+            cv2.imshow("BarcodeCV Preview", display_image)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -141,7 +143,7 @@ def _run_preview(config: dict):
                 # One-shot scan on current frame
                 logger.info("Scanning current frame...")
                 scanner = _create_scanner(config)
-                results = scanner.scan(preprocess_for_detection(global_frame.image))
+                results = scanner.scan(preprocess_for_detection(frame.image))
                 for r in results:
                     if r.success:
                         logger.info("  Found: %s (%s)", r.content, r.scanner_used)
@@ -249,7 +251,7 @@ def _run_calibration(config: dict):
 
     with camera_manager:
         calibrator = DistanceCalibrator(
-            camera=camera_manager.local_camera,
+            camera=camera_manager.camera,
             decoder=_ScannerAdapter(scanner),
             focus_scorer=scorer,
             metric=metric,

@@ -15,10 +15,10 @@ export default async function ModelsPage() {
   } catch {
     return (
       <div className="space-y-6">
-        <PageHeader badge="模型清單" title="模型" description="檢視辨識服務使用中的啟用模型與可用版本。" />
+        <PageHeader badge="model list" title="Models" description="View active models and available versions used by the recognition service." />
         <EmptyState
-          title="無法載入模型資料"
-          description="API 請求失敗。請確認後端連線後重新整理再試。"
+          title="Failed to load model data"
+          description="API request failed. Check backend connection and refresh to try again."
         />
       </div>
     );
@@ -27,8 +27,8 @@ export default async function ModelsPage() {
   if (models.length === 0) {
     return (
       <div className="space-y-6">
-        <PageHeader badge="模型清單" title="模型" description="檢視辨識服務使用中的啟用模型與可用版本。" />
-        <EmptyState title="沒有模型紀錄" description="目前後端 API 尚未提供模型中繼資料。" />
+        <PageHeader badge="model list" title="Models" description="View active models and available versions used by the recognition service." />
+        <EmptyState title="No model records" description="The backend API does not currently provide model metadata." />
       </div>
     );
   }
@@ -38,13 +38,13 @@ export default async function ModelsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        badge="模型清單"
-        title="模型"
-        description="檢視目前啟用模型設定與可用版本，供營運追蹤。"
+        badge="model list"
+        title="Models"
+        description="View active model configuration and available versions for operational tracking."
       />
 
       <section className="grid gap-6 xl:grid-cols-[0.8fr_1.2fr]">
-        <SectionCard title="啟用模型" description="辨識流程目前使用的正式環境模型。">
+        <SectionCard title="Active Model" description="The production model currently used by the recognition pipeline.">
           <div className="rounded-xl border bg-background p-5">
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -53,13 +53,13 @@ export default async function ModelsPage() {
                   {activeModel.framework} · {activeModel.modelVersion}
                 </p>
               </div>
-              <Badge variant="success">啟用中</Badge>
+              <Badge variant="success">Active</Badge>
             </div>
             <p className="mt-4 text-sm leading-6 text-muted-foreground">{activeModel.remark}</p>
           </div>
         </SectionCard>
 
-        <SectionCard title="模型清單" description="後端 API 提供的模型中繼資料。">
+        <SectionCard title="Model List" description="Model metadata provided by the backend API.">
           <Table>
             <TableHeader>
               <TableRow>

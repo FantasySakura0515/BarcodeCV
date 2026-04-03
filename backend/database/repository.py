@@ -25,9 +25,8 @@ class ScanRecord:
     decoder_used: str | None = None
     decode_time_ms: float | None = None
     decode_error: str | None = None
-    image_source: str | None = None  # "global" or "local"
-    wide_image_path: str | None = None
-    closeup_image_path: str | None = None
+    image_source: str | None = None  # "main"
+    frame_image_path: str | None = None
     camera_distance_mm: float | None = None
     id: int | None = None
 
@@ -70,8 +69,8 @@ class ScanRepository:
              bbox_x1, bbox_y1, bbox_x2, bbox_y2,
              decoded_content, decode_success, decoder_used,
              decode_time_ms, decode_error, image_source,
-             wide_image_path, closeup_image_path, camera_distance_mm)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             frame_image_path, camera_distance_mm)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.session_id,
                 record.timestamp,
@@ -86,8 +85,7 @@ class ScanRepository:
                 record.decode_time_ms,
                 record.decode_error,
                 record.image_source,
-                record.wide_image_path,
-                record.closeup_image_path,
+                record.frame_image_path,
                 record.camera_distance_mm,
             ),
         )
@@ -149,8 +147,7 @@ class ScanRepository:
             decode_time_ms=row["decode_time_ms"],
             decode_error=row["decode_error"],
             image_source=row["image_source"],
-            wide_image_path=row["wide_image_path"],
-            closeup_image_path=row["closeup_image_path"],
+            frame_image_path=row["frame_image_path"],
             camera_distance_mm=row["camera_distance_mm"],
         )
 
@@ -174,7 +171,7 @@ class BoxRecord:
     scan_record_id: int | None = None   # FK → scan_records.id
     decoded_content: str | None = None
     overlap_ratio: float | None = None
-    wide_image_path: str | None = None
+    frame_image_path: str | None = None
     id: int | None = None
 
 
@@ -189,7 +186,7 @@ class BoxRepository:
             """INSERT INTO box_records
             (session_id, timestamp, box_bbox_x1, box_bbox_y1,
              box_bbox_x2, box_bbox_y2, box_area, status,
-             scan_record_id, decoded_content, overlap_ratio, wide_image_path)
+             scan_record_id, decoded_content, overlap_ratio, frame_image_path)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.session_id,
@@ -203,7 +200,7 @@ class BoxRepository:
                 record.scan_record_id,
                 record.decoded_content,
                 record.overlap_ratio,
-                record.wide_image_path,
+                record.frame_image_path,
             ),
         )
         self._conn.commit()
@@ -260,5 +257,5 @@ class BoxRepository:
             scan_record_id=row["scan_record_id"],
             decoded_content=row["decoded_content"],
             overlap_ratio=row["overlap_ratio"],
-            wide_image_path=row["wide_image_path"],
+            frame_image_path=row["frame_image_path"],
         )

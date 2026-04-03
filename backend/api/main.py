@@ -29,6 +29,7 @@ from .schemas import (
     UpdateRemarkRequest,
 )
 from ..database.business_repository import BusinessRepository
+from ..camera.camarray_guard import run_camarray_startup_check
 from ..database.db_manager import DatabaseManager
 from ..services.detection_records_service import DetectionRecordsService
 from ..services.detection_service import DetectionService
@@ -76,6 +77,7 @@ async def lifespan(app: FastAPI):
     detection_records_service = DetectionRecordsService(db_manager.get_connection())
     camera_service = CameraService(config, detection_service)
     stats_service = StatsService(db_manager.get_connection(), config)
+    camarray_report = run_camarray_startup_check(config)
 
     image_dir = Path(config.get("system", {}).get("image_output_dir", "./output/images"))
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -87,6 +89,7 @@ async def lifespan(app: FastAPI):
     app.state.detection_records_service = detection_records_service
     app.state.camera_service = camera_service
     app.state.stats_service = stats_service
+    app.state.camarray_report = camarray_report
     yield
     db_manager.close()
 
@@ -350,6 +353,7 @@ def debug_cameras() -> dict:
     Call via browser or curl:  GET /api/cameras/debug
     """
     diagnostics = PiCameraSource.diagnose()
+    startup_report = getattr(app.state, "camarray_report", None)
     suggested_fixes: list[str] = []
     picamera_num_mapping_preview: list[dict] = []
 
@@ -363,11 +367,12 @@ def debug_cameras() -> dict:
         suggested_fixes.append("libcamera-hello --list-cameras")
 
     if isinstance(diagnostics.get("global_camera_info"), list) and not diagnostics.get("global_camera_info"):
-        suggested_fixes.append("libcamera-hello --list-cameras  # 若為空，請檢查 CSI 排線與 /boot/firmware/config.txt")
-        suggested_fixes.append("sudo raspi-config  # Interface Options -> Camera；重開機後再測")
+        suggested_fixes.append("libcamera-hello --list-cameras  # if empty, check CSI ribbon cable and /boot/firmware/config.txt")
+        suggested_fixes.append("sudo raspi-config  # Interface Options -> Camera; reboot and test again")
         suggested_fixes.append(
-            "若使用 USB/UVC Arducam，請在 config/default.yaml 將 cameras.*.allow_opencv_fallback 設為 true"
+            "If using USB/UVC Arducam, set cameras.main.allow_opencv_fallback to true in config/default.yaml"
         )
+        suggested_fixes.append("B0402 dual mode: sudo i2cset -y 10 0x24 0x24 0x01")
 
     global_camera_info = diagnostics.get("global_camera_info")
     if isinstance(global_camera_info, list):
@@ -386,7 +391,10 @@ def debug_cameras() -> dict:
             for role, cfg in configured.items():
                 if not isinstance(cfg, dict):
                     continue
-                configured_num = int(cfg.get("camera_num", 0))
+                try:
+                    configured_num = int(cfg.get("camera_num", 0))
+                except (TypeError, ValueError):
+                    configured_num = 0
                 resolved_num = configured_num
                 remapped = False
                 if configured_num not in available_nums and 0 <= configured_num < len(available_nums):
@@ -416,6 +424,7 @@ def debug_cameras() -> dict:
             for item in get_camera_service().list_cameras()
         ],
         "system_diagnostics": diagnostics,
+        "camarray_startup_check": startup_report,
         "picamera_num_mapping_preview": picamera_num_mapping_preview,
         "suggested_fixes": suggested_fixes,
     }

@@ -84,7 +84,7 @@ def test_create_camera_source_allows_direct_picamera_open_when_enumeration_is_em
     service = CameraService(
         config={
             "cameras": {
-                "global": {
+                "main": {
                     "type": "arducam",
                     "camera_num": 1,
                     "width": 1280,
@@ -96,10 +96,10 @@ def test_create_camera_source_allows_direct_picamera_open_when_enumeration_is_em
         detection_service=MagicMock(),
     )
 
-    source = service._create_camera_source("global")
+    source = service._create_camera_source("main")
 
     assert isinstance(source, FakePiCameraSource)
     assert source.camera_num == 1
     assert source.width == 1280
     assert source.height == 720
-    assert source.camera_id == "global"
+    assert source.camera_id == "main"

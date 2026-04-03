@@ -159,37 +159,36 @@ else:
     warn("Skipped (picamera2 not importable)")
 
 # ---------------------------------------------------------------------------
-# 7. Try opening each camera index
+# 7. Try opening configured aggregated camera
 # ---------------------------------------------------------------------------
-section("7. Try opening cameras (0 and 1)")
+section("7. Try opening camera 0 (CamArray aggregated device)")
 if picam2_ok:
-    for cam_num in (0, 1):
-        print(f"\n  --- Camera {cam_num} ---")
-        try:
-            from picamera2 import Picamera2  # type: ignore
+    cam_num = 0
+    try:
+        from picamera2 import Picamera2  # type: ignore
 
-            picam = Picamera2(camera_num=cam_num)
-            opened = False
-            for fmt in ["BGR888", "XBGR8888", "RGB888"]:
-                try:
-                    cfg = picam.create_video_configuration(
-                        main={"size": (640, 480), "format": fmt}
-                    )
-                    picam.configure(cfg)
-                    ok(f"Camera {cam_num}: configured with format {fmt}")
-                    opened = True
-                    break
-                except Exception as fe:
-                    warn(f"Camera {cam_num}: format {fmt} rejected \u2014 {fe}")
+        picam = Picamera2(camera_num=cam_num)
+        opened = False
+        for fmt in ["BGR888", "XBGR8888", "RGB888"]:
+            try:
+                cfg = picam.create_video_configuration(
+                    main={"size": (640, 480), "format": fmt}
+                )
+                picam.configure(cfg)
+                ok(f"Camera {cam_num}: configured with format {fmt}")
+                opened = True
+                break
+            except Exception as fe:
+                warn(f"Camera {cam_num}: format {fmt} rejected \u2014 {fe}")
 
-            if opened:
-                picam.start()
-                arr = picam.capture_array()
-                ok(f"Camera {cam_num}: captured frame shape={arr.shape} dtype={arr.dtype}")
-                picam.stop()
-            picam.close()
-        except Exception as exc:
-            fail(f"Camera {cam_num}: {exc}")
+        if opened:
+            picam.start()
+            arr = picam.capture_array()
+            ok(f"Camera {cam_num}: captured frame shape={arr.shape} dtype={arr.dtype}")
+            picam.stop()
+        picam.close()
+    except Exception as exc:
+        fail(f"Camera {cam_num}: {exc}")
 else:
     warn("Skipped (picamera2 not importable)")
 
@@ -209,6 +208,15 @@ try:
     if cameras_cfg:
         for role, c in cameras_cfg.items():
             info(f"{role}: type={c.get('type')}, camera_num={c.get('camera_num')}")
+        camarray_cfg = cfg.get("camarray", {})
+        if camarray_cfg:
+            info(
+                "camarray: mode={mode}, layout={layout}, active_channels={channels}".format(
+                    mode=camarray_cfg.get("mode"),
+                    layout=camarray_cfg.get("layout"),
+                    channels=camarray_cfg.get("active_channels"),
+                )
+            )
     else:
         warn("No 'cameras' section found in config/default.yaml")
 except ImportError:
@@ -232,12 +240,14 @@ print("""
     \u2192 Run: sudo apt install python3-picamera2 python3-libcamera
     \u2192 Recreate venv: python3 -m venv --system-site-packages .venv
 
-  If step 6/7 show only 1 camera but config expects 2:
-    \u2192 Only one CSI camera is connected; set local.camera_num to the same
-       camera as global (0), or connect the second camera.
+  If step 6/7 show no camera 0 for a B0402 CamArray:
+    \u2192 Verify Arducam dual-channel mode is enabled before blaming the app.
+       Example for channels 0+1 on Pi 5:
+       sudo i2cset -y 10 0x24 0x24 0x01
+       Then rerun: rpicam-hello --list-cameras
 
-    If you use CSI Arducam on Raspberry Pi:
-        \u2192 Keep cameras.*.type=arducam and allow_opencv_fallback=false (recommended).
+  If you use CSI Arducam on Raspberry Pi:
+    \u2192 Keep cameras.main.type=arducam and allow_opencv_fallback=false (recommended).
         \u2192 OpenCV fallback is only for USB/UVC adapters and may fail on CSI-only setups.
 
   If everything above is OK but the API still shows unavailable:

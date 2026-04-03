@@ -32,7 +32,7 @@ class _ScannerProtocol(Protocol):
 
 
 class ScanPipeline:
-    """Orchestrates the Global-to-Local DataMatrix scan cycle.
+    """Orchestrates a single-camera DataMatrix scan cycle.
 
     Supports two scanner backends (set via ``config.scanner.mode``):
       - ``"nn"`` (default): YOLO detection + CRNN recognition — fully neural
@@ -72,58 +72,39 @@ class ScanPipeline:
         self._image_dir = config.get("system", {}).get("image_output_dir", "./output/images")
         self._preprocess_cfg = config.get("decoding", {}).get("preprocessing", {})
 
-    def run_single_scan(self) -> ScanSummary:
-        """Execute one full Global-to-Local scan cycle.
+        if self._save_images:
+            Path(self._image_dir).mkdir(parents=True, exist_ok=True)
 
-        1. Global camera captures wide view → BoxDetector + CompositeScanner
-        2. Local camera captures close-up → CompositeScanner (higher resolution)
-        3. Merge DataMatrix results (deduplicate by content, prefer local)
-        4. SpatialMatcher pairs each box with its DataMatrix (if any)
-        5. Persist scan_records (DataMatrix) and box_records (all boxes)
-        6. Return ScanSummary with matched/missing breakdown
-        """
+    def run_single_scan(self) -> ScanSummary:
+        """Execute one full single-camera scan cycle."""
         session_id = self._session_id or str(uuid.uuid4())[:8]
         timestamp = datetime.now().isoformat()
 
-        # --- Global Phase ---
-        logger.info("=== Global Phase: Scanning wide-angle frame ===")
-        global_frame = self._cameras.capture_global()
-        global_image = preprocess_for_detection(global_frame.image)
+        logger.info("=== Main Phase: Scanning aggregated frame ===")
+        frame = self._cameras.capture()
+        detection_image = preprocess_for_detection(frame.image)
+        scan_image = self._preprocess_image(detection_image)
 
-        # Box detection on global frame
         boxes = []
         if self._box_detection_enabled:
-            boxes = self._box_detector.detect(global_image)
-            logger.info("Global camera detected %d boxes", len(boxes))
+            boxes = self._box_detector.detect(detection_image)
+            logger.info("Main camera detected %d boxes", len(boxes))
 
-        global_results = self._scanner.scan(global_image)
-        global_successful = [r for r in global_results if r.success]
-        logger.info("Global camera found %d DataMatrix codes", len(global_successful))
+        scan_results = self._scanner.scan(scan_image)
+        successful_results = self._deduplicate_results(
+            [result for result in scan_results if result.success]
+        )
+        logger.info("Main camera found %d unique DataMatrix codes", len(successful_results))
 
-        global_image_path = None
+        frame_image_path = None
         if self._save_images:
-            global_image_path = self._save_frame(global_image, session_id, "global")
+            frame_image_path = self._save_frame(scan_image, session_id, "main")
 
-        # --- Local Phase ---
-        logger.info("=== Local Phase: Scanning close-up frame ===")
-        local_frame = self._cameras.capture_local()
-        local_image = self._preprocess_image(local_frame.image)
-
-        local_results = self._scanner.scan(local_image)
-        local_successful = [r for r in local_results if r.success]
-        logger.info("Local camera found %d DataMatrix codes", len(local_successful))
-
-        local_image_path = None
-        if self._save_images:
-            local_image_path = self._save_frame(local_image, session_id, "local")
-
-        # --- Merge DataMatrix Results ---
-        merged = self._merge_results(global_successful, local_successful)
-        logger.info("Total unique codes after merge: %d", len(merged))
-
-        # --- Persist scan_records ---
-        scan_record_map: dict[str, tuple[int, ScanResult, str]] = {}
-        for content, result, source in merged:
+        scan_record_map: dict[str, tuple[int, ScanResult]] = {}
+        for result in successful_results:
+            content = result.content
+            if not content:
+                continue
             record = ScanRecord(
                 session_id=session_id,
                 timestamp=timestamp,
@@ -136,15 +117,13 @@ class ScanPipeline:
                 decode_success=True,
                 decoder_used=result.scanner_used,
                 decode_time_ms=result.scan_time_ms,
-                image_source=source,
-                wide_image_path=global_image_path,
-                closeup_image_path=local_image_path,
+                image_source="main",
+                frame_image_path=frame_image_path,
             )
             row_id = self._repo.insert_scan(record)
-            scan_record_map[content] = (row_id, result, source)
+            scan_record_map[content] = (row_id, result)
 
-        # --- Spatial Matching + box_records ---
-        merged_scan_results = [result for _, result, _ in merged]
+        merged_scan_results = [result for _, result in scan_record_map.values()]
         if self._box_detection_enabled and self._spatial_matcher and self._box_repo:
             match_results = self._spatial_matcher.match(boxes, merged_scan_results)
 
@@ -165,49 +144,34 @@ class ScanPipeline:
                     scan_record_id=scan_id,
                     decoded_content=content,
                     overlap_ratio=match.overlap_ratio,
-                    wide_image_path=global_image_path,
+                    frame_image_path=frame_image_path,
                 )
                 self._box_repo.insert_box(box_record)
 
-            summary = self._spatial_matcher.summarize(match_results, len(merged))
+            summary = self._spatial_matcher.summarize(match_results, len(successful_results))
         else:
-            # No box detection: build a minimal summary from scan results only
             summary = ScanSummary(
                 matched=[],
                 missing=[],
                 total_boxes=0,
-                total_datamatrix=len(merged),
+                total_datamatrix=len(successful_results),
             )
 
         logger.info(
             "Scan complete: %d codes decoded, %d boxes matched, %d missing DataMatrix",
-            len(merged),
+            len(successful_results),
             len(summary.matched),
             len(summary.missing),
         )
         return summary
 
-    def _merge_results(
-        self,
-        global_results: list[ScanResult],
-        local_results: list[ScanResult],
-    ) -> list[tuple[str, ScanResult, str]]:
-        """Merge and deduplicate results from both cameras.
-
-        Prefers Local camera results (higher resolution).
-        Returns list of (content, ScanResult, source_label).
-        """
-        merged: dict[str, tuple[ScanResult, str]] = {}
-
-        for r in local_results:
-            if r.content and r.content not in merged:
-                merged[r.content] = (r, "local")
-
-        for r in global_results:
-            if r.content and r.content not in merged:
-                merged[r.content] = (r, "global")
-
-        return [(content, result, source) for content, (result, source) in merged.items()]
+    @staticmethod
+    def _deduplicate_results(results: list[ScanResult]) -> list[ScanResult]:
+        unique: dict[str, ScanResult] = {}
+        for result in results:
+            if result.content and result.content not in unique:
+                unique[result.content] = result
+        return list(unique.values())
 
     def _preprocess_image(self, image):
         """Apply preprocessing to improve decoding quality."""
@@ -269,7 +233,6 @@ class ScanPipeline:
 
     def _save_frame(self, image, session_id: str, label: str) -> str:
         """Save a frame to disk and return the path."""
-        Path(self._image_dir).mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{session_id}_{label}_{ts}.jpg"
         path = str(Path(self._image_dir) / filename)

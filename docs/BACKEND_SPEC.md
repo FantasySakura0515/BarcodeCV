@@ -66,7 +66,7 @@ backend/
 ├─ main.py                    # CLI 入口與模式切換
 ├─ pipeline.py                # 掃描流程協調
 ├─ calibration/               # 距離校正、清晰度評估
-├─ camera/                    # 鏡頭抽象與雙鏡頭管理
+├─ camera/                    # 鏡頭抽象與單一 CamArray 聚合鏡頭管理
 ├─ database/                  # DB manager 與 repository
 ├─ decoding/                  # 條碼解碼器與 fallback 掃描器
 ├─ detection/                 # OpenCV box detector、YOLO detector、前處理、空間配對
@@ -79,7 +79,7 @@ backend/
 |---|---|
 | `main.py` | 啟動模式切換，整合 config、logger、pipeline |
 | `pipeline.py` | 協調整體掃描生命週期與資料落庫 |
-| `camera/` | 控制 global / local camera 與 frame capture |
+| `camera/` | 控制單一 CamArray 聚合鏡頭與 frame capture |
 | `detection/` | 物件框選、前處理、空間配對 |
 | `decoding/` | 條碼掃描與多解碼器 fallback |
 | `database/` | session / scan / box 相關資料存取 |

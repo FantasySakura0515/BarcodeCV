@@ -7,11 +7,11 @@ logger = logging.getLogger("barcodecv.mapper")
 
 
 class CoordinateMapper:
-    """Maps bounding box coordinates from Global camera to Local camera image space.
+    """Legacy utility for cross-view coordinate mapping.
 
-    Uses a homography matrix to transform points between the two camera views.
-    The homography can be computed from corresponding point pairs (calibration)
-    or set manually.
+    BarcodeCV now runs on a single aggregated CamArray feed, so this helper is
+    not part of the main scan flow. It is kept for experiments that still need
+    a manually-specified homography between two image planes.
     """
 
     def __init__(self):
@@ -47,13 +47,13 @@ class CoordinateMapper:
     def map_bbox(
         self, bbox: tuple[int, int, int, int]
     ) -> tuple[int, int, int, int] | None:
-        """Map a bounding box from Global to Local image coordinates.
+        """Map a bounding box between two calibrated image planes.
 
         Args:
-            bbox: (x1, y1, x2, y2) in Global image pixels.
+            bbox: (x1, y1, x2, y2) in source image pixels.
 
         Returns:
-            (x1, y1, x2, y2) in Local image pixels, or None if no homography.
+            (x1, y1, x2, y2) in target image pixels, or None if no homography.
         """
         if self._homography is None:
             return None

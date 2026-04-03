@@ -31,8 +31,7 @@ CREATE TABLE IF NOT EXISTS scan_records (
     decode_time_ms       REAL,
     decode_error         TEXT,
     image_source         TEXT,
-    wide_image_path      TEXT,
-    closeup_image_path   TEXT,
+    frame_image_path     TEXT,
     camera_distance_mm   REAL,
     remark               TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
@@ -70,7 +69,7 @@ CREATE TABLE IF NOT EXISTS box_records (
     scan_record_id   INTEGER,
     decoded_content  TEXT,
     overlap_ratio    REAL,
-    wide_image_path  TEXT,
+    frame_image_path TEXT,
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (session_id) REFERENCES scan_sessions(id),
     FOREIGN KEY (scan_record_id) REFERENCES scan_records(id)
@@ -261,21 +260,163 @@ class DatabaseManager:
         if self._conn is None:
             raise RuntimeError("Not connected. Call connect() first.")
         self._conn.executescript(SCHEMA_SQL)
+        self._migrate_scan_records_schema()
+        self._migrate_box_records_schema()
         self._ensure_column("scan_records", "remark", "TEXT")
         self._ensure_column("tasks", "remark", "TEXT")
         self._conn.commit()
         logger.info("Database schema initialized")
 
+    def _migrate_scan_records_schema(self) -> None:
+        if self._conn is None:
+            raise RuntimeError("Not connected. Call connect() first.")
+
+        columns = self._table_columns("scan_records")
+        if "frame_image_path" in columns and "wide_image_path" not in columns and "closeup_image_path" not in columns:
+            return
+
+        frame_sources = [name for name in ("closeup_image_path", "wide_image_path", "frame_image_path") if name in columns]
+        frame_expr = self._coalesce_expr(frame_sources)
+        remark_expr = "remark" if "remark" in columns else "NULL"
+        created_expr = "created_at" if "created_at" in columns else "datetime('now')"
+        image_expr = (
+            "CASE WHEN image_source IN ('global', 'local') THEN 'main' "
+            "ELSE COALESCE(image_source, 'main') END"
+            if "image_source" in columns
+            else "'main'"
+        )
+
+        self._conn.execute("ALTER TABLE scan_records RENAME TO scan_records_legacy")
+        self._conn.execute(
+            """
+            CREATE TABLE scan_records (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id           TEXT NOT NULL,
+                timestamp            TEXT NOT NULL,
+                detection_confidence REAL,
+                bbox_x1              INTEGER,
+                bbox_y1              INTEGER,
+                bbox_x2              INTEGER,
+                bbox_y2              INTEGER,
+                decoded_content      TEXT,
+                decode_success       INTEGER NOT NULL DEFAULT 0,
+                decoder_used         TEXT,
+                decode_time_ms       REAL,
+                decode_error         TEXT,
+                image_source         TEXT,
+                frame_image_path     TEXT,
+                camera_distance_mm   REAL,
+                remark               TEXT,
+                created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (session_id) REFERENCES scan_sessions(id)
+            )
+            """
+        )
+        self._conn.execute(
+            f"""
+            INSERT INTO scan_records (
+                id, session_id, timestamp, detection_confidence,
+                bbox_x1, bbox_y1, bbox_x2, bbox_y2,
+                decoded_content, decode_success, decoder_used,
+                decode_time_ms, decode_error, image_source,
+                frame_image_path, camera_distance_mm, remark, created_at
+            )
+            SELECT
+                id, session_id, timestamp, detection_confidence,
+                bbox_x1, bbox_y1, bbox_x2, bbox_y2,
+                decoded_content, decode_success, decoder_used,
+                decode_time_ms, decode_error,
+                {image_expr},
+                {frame_expr},
+                camera_distance_mm,
+                {remark_expr},
+                {created_expr}
+            FROM scan_records_legacy
+            """
+        )
+        self._conn.execute("DROP TABLE scan_records_legacy")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_records_session ON scan_records(session_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_records_content ON scan_records(decoded_content)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_records_timestamp ON scan_records(timestamp)")
+
+    def _migrate_box_records_schema(self) -> None:
+        if self._conn is None:
+            raise RuntimeError("Not connected. Call connect() first.")
+
+        columns = self._table_columns("box_records")
+        if "frame_image_path" in columns and "wide_image_path" not in columns:
+            return
+
+        frame_sources = [name for name in ("wide_image_path", "frame_image_path") if name in columns]
+        frame_expr = self._coalesce_expr(frame_sources)
+        created_expr = "created_at" if "created_at" in columns else "datetime('now')"
+
+        self._conn.execute("ALTER TABLE box_records RENAME TO box_records_legacy")
+        self._conn.execute(
+            """
+            CREATE TABLE box_records (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id       TEXT NOT NULL,
+                timestamp        TEXT NOT NULL,
+                box_bbox_x1      INTEGER,
+                box_bbox_y1      INTEGER,
+                box_bbox_x2      INTEGER,
+                box_bbox_y2      INTEGER,
+                box_area         REAL,
+                status           TEXT NOT NULL,
+                scan_record_id   INTEGER,
+                decoded_content  TEXT,
+                overlap_ratio    REAL,
+                frame_image_path TEXT,
+                created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (session_id) REFERENCES scan_sessions(id),
+                FOREIGN KEY (scan_record_id) REFERENCES scan_records(id)
+            )
+            """
+        )
+        self._conn.execute(
+            f"""
+            INSERT INTO box_records (
+                id, session_id, timestamp, box_bbox_x1, box_bbox_y1,
+                box_bbox_x2, box_bbox_y2, box_area, status,
+                scan_record_id, decoded_content, overlap_ratio,
+                frame_image_path, created_at
+            )
+            SELECT
+                id, session_id, timestamp, box_bbox_x1, box_bbox_y1,
+                box_bbox_x2, box_bbox_y2, box_area, status,
+                scan_record_id, decoded_content, overlap_ratio,
+                {frame_expr}, {created_expr}
+            FROM box_records_legacy
+            """
+        )
+        self._conn.execute("DROP TABLE box_records_legacy")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_box_records_session ON box_records(session_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_box_records_status ON box_records(status)")
+
     def _ensure_column(self, table_name: str, column_name: str, column_sql: str) -> None:
         if self._conn is None:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        rows = self._conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        existing_columns = {row["name"] for row in rows}
+        existing_columns = self._table_columns(table_name)
         if column_name not in existing_columns:
             self._conn.execute(
                 f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"
             )
+
+    def _table_columns(self, table_name: str) -> set[str]:
+        if self._conn is None:
+            raise RuntimeError("Not connected. Call connect() first.")
+        rows = self._conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {row["name"] for row in rows}
+
+    @staticmethod
+    def _coalesce_expr(columns: list[str]) -> str:
+        if not columns:
+            return "NULL"
+        if len(columns) == 1:
+            return columns[0]
+        return f"COALESCE({', '.join(columns)})"
 
     def get_connection(self) -> sqlite3.Connection:
         if self._conn is None:
