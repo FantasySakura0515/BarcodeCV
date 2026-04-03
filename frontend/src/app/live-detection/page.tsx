@@ -1,7 +1,7 @@
-"use client";
+﻿"use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowsIn, ArrowsOut, Camera, CameraRotate, Play, Stop, WarningCircle } from "@phosphor-icons/react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pulse, ArrowsClockwise, ArrowsIn, ArrowsOut, Camera, CameraRotate, Play, SlidersHorizontal, Stop, WarningCircle, User } from "@phosphor-icons/react";
 
 import { EmptyState } from "@/components/common/empty-state";
 import { PageHeader } from "@/components/common/page-header";
@@ -92,7 +92,52 @@ function buildOverlayLines(item: DetectionObject, showDecodeInfo: boolean) {
   return [item.bid];
 }
 
+
+async function getBrowserCameras(): Promise<LiveCameraOption[]> {
+  if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
+    return [];
+  }
+  if (typeof window !== "undefined" && !window.isSecureContext) {
+    return [];
+  }
+  try {
+    const devicesPromise = navigator.mediaDevices.enumerateDevices();
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("enumerateDevices timeout")), 5000)
+    );
+    const devices = (await Promise.race([devicesPromise, timeoutPromise])) as MediaDeviceInfo[];
+    const videoInputs = devices.filter((device) => device.kind === "videoinput");
+    return videoInputs.map((device, index) => ({
+      id: `browser-${device.deviceId || index}`,
+      label: device.label || `瀏覽器鏡頭 ${index + 1}`,
+      sourceType: "browser" as CameraInfo["sourceType"],
+      sourceScope: "browser" as const,
+      deviceId: device.deviceId,
+      cameraNum: index,
+      width: 1280,
+      height: 720,
+      available: true,
+      status: device.label ? "準備就緒" : "請授權鏡頭存取權限",
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export default function LiveDetectionPage() {
+  const [isSwitchingCamera, setIsSwitchingCamera] = useState(false);
+  const [liveResults, setLiveResults] = useState<{ objects: DetectionObject[] }>({ objects: [] });
+  const setSelectedObject = (obj: DetectionObject | null) => {
+    setSelectedBid(obj?.bid ?? null);
+  };
+  const handleToggleScan = () => {
+    if (isScanningLive) {
+      stopPreview();
+    } else {
+      startPreview();
+    }
+  };
+
   const [cameras, setCameras] = useState<LiveCameraOption[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<string>("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -187,9 +232,67 @@ export default function LiveDetectionPage() {
     };
   }, [performanceProfile.detectScale, performanceProfile.previewScale, selectedCameraSurface]);
 
+  const refreshCameras = useCallback(async () => {
+    setIsLoadingCameras(true);
+    setError(null);
+    try {
+      const [backendResult, browserResult] = await Promise.allSettled([
+        fetchCameras(),
+        getBrowserCameras(),
+      ]);
+
+      const rawBackend = backendResult.status === "fulfilled" ? backendResult.value : undefined;
+      const rawBrowser = browserResult.status === "fulfilled" ? browserResult.value : undefined;
+      const backendItems: CameraInfo[] = Array.isArray(rawBackend) ? (rawBackend as CameraInfo[]) : [];
+      const browserItems: LiveCameraOption[] = Array.isArray(rawBrowser) ? rawBrowser : [];
+
+      if (backendResult.status === "rejected") {
+        const msg = backendResult.reason instanceof Error ? backendResult.reason.message : "無法連線到後端";
+        setError(`後端鏡頭載入失敗：${msg}`);
+      } else if (!Array.isArray(rawBackend)) {
+        setError(`後端回應格式異常（非陣列）：${JSON.stringify(rawBackend)?.slice(0, 120)}`);
+      }
+
+      const items: LiveCameraOption[] = [
+        ...browserItems,
+        ...backendItems.map((item) => ({
+          ...item,
+          sourceScope: "backend" as const,
+        })),
+      ];
+
+      setCameras(items);
+
+      const preferred = items.find((item) => item.id === selectedCameraId && item.available)
+        ?? items.find((item) => item.available)
+        ?? items[0]
+        ?? null;
+
+      setSelectedCameraId(preferred?.id ?? "");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "無法取得鏡頭清單";
+      setError(message);
+    } finally {
+      setIsLoadingCameras(false);
+    }
+  }, [selectedCameraId]);
+
+  const previewFromBrowserCamera = useCallback(async () => {
+    if (!selectedCamera) {
+      throw new Error("請先選擇可用鏡頭");
+    }
+
+    const snapshot = await captureBrowserSnapshot(
+      selectedCamera,
+      performanceProfile.jpegQuality,
+      scaleDimension(videoRef.current?.videoWidth || 1280, performanceProfile.detectScale),
+    );
+    return previewDetection(snapshot.file);
+  }, [performanceProfile.detectScale, performanceProfile.jpegQuality, selectedCamera]);
+
   useEffect(() => {
     void refreshCameras();
-  }, []);
+  }, [refreshCameras]);
 
   useEffect(() => {
     return () => {
@@ -288,7 +391,7 @@ export default function LiveDetectionPage() {
             if (!cancelled && previewSessionRef.current === sessionId) {
               const elapsedMs = Date.now() - cycleStart;
               syncCameraActualResolution(selectedCameraId, response.sourceImage);
-              setObjects(response.objects);
+              setObjects(response.objects); setLiveResults({ objects: response.objects });
               setStableObjects((prev) => mergeStableObjects(prev, response.objects));
               setOverlaySourceSize(response.sourceImage ?? null);
               setSelectedBid((current) => current ?? response.objects[0]?.bid ?? null);
@@ -299,7 +402,7 @@ export default function LiveDetectionPage() {
             const response = await previewFromBrowserCamera();
             if (!cancelled && previewSessionRef.current === sessionId) {
               const elapsedMs = Date.now() - cycleStart;
-              setObjects(response.objects);
+              setObjects(response.objects); setLiveResults({ objects: response.objects });
               setStableObjects((prev) => mergeStableObjects(prev, response.objects));
               setOverlaySourceSize(response.sourceImage ?? null);
               setSelectedBid((current) => current ?? response.objects[0]?.bid ?? null);
@@ -333,7 +436,7 @@ export default function LiveDetectionPage() {
       }
       setIsScanningLive(false);
     };
-  }, [isPreviewing, performanceProfile.minCycleMs, performanceProfile.detectScale, performanceTargetSize, selectedCamera, selectedCameraId]);
+  }, [isPreviewing, performanceProfile.minCycleMs, performanceProfile.detectScale, performanceTargetSize, previewFromBrowserCamera, selectedCamera, selectedCameraId]);
 
   // MJPEG stream URL for backend cameras — browser handles frame updates natively.
   // Detection runs concurrently by reading the server-side frame cache.
@@ -411,51 +514,6 @@ export default function LiveDetectionPage() {
     setPreviewUrl(objectUrl);
   }
 
-  async function refreshCameras() {
-    setIsLoadingCameras(true);
-    setError(null);
-    try {
-      const [backendResult, browserResult] = await Promise.allSettled([
-        fetchCameras(),
-        getBrowserCameras(),
-      ]);
-
-      const rawBackend = backendResult.status === "fulfilled" ? backendResult.value : undefined;
-      const rawBrowser = browserResult.status === "fulfilled" ? browserResult.value : undefined;
-      const backendItems: CameraInfo[] = Array.isArray(rawBackend) ? (rawBackend as CameraInfo[]) : [];
-      const browserItems: LiveCameraOption[] = Array.isArray(rawBrowser) ? rawBrowser : [];
-
-      if (backendResult.status === "rejected") {
-        const msg = backendResult.reason instanceof Error ? backendResult.reason.message : "無法連線到後端";
-        setError(`後端鏡頭載入失敗：${msg}`);
-      } else if (!Array.isArray(rawBackend)) {
-        setError(`後端回應格式異常（非陣列）：${JSON.stringify(rawBackend)?.slice(0, 120)}`);
-      }
-
-      const items: LiveCameraOption[] = [
-        ...browserItems,
-        ...backendItems.map((item) => ({
-          ...item,
-          sourceScope: "backend" as const,
-        })),
-      ];
-
-      setCameras(items);
-
-      const preferred = items.find((item) => item.id === selectedCameraId && item.available)
-        ?? items.find((item) => item.available)
-        ?? items[0]
-        ?? null;
-
-      setSelectedCameraId(preferred?.id ?? "");
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "無法取得鏡頭清單";
-      setError(message);
-    } finally {
-      setIsLoadingCameras(false);
-    }
-  }
-
   function startPreview() {
     if (!selectedCameraId || !selectedCamera) {
       setError("請先選擇可用鏡頭");
@@ -510,7 +568,7 @@ export default function LiveDetectionPage() {
 
         const response = await runDetection(snapshot.file);
         setRid(response.rid);
-        setObjects(response.objects);
+        setObjects(response.objects); setLiveResults({ objects: response.objects });
         setOverlaySourceSize(response.sourceImage ?? snapshot.sourceImage);
         setSelectedBid(response.objects[0]?.bid ?? null);
 
@@ -524,7 +582,7 @@ export default function LiveDetectionPage() {
         const response = await captureLiveDetection(selectedCameraId);
         syncCameraActualResolution(selectedCameraId, response.sourceImage);
         setRid(response.rid);
-        setObjects(response.objects);
+        setObjects(response.objects); setLiveResults({ objects: response.objects });
         setOverlaySourceSize(response.sourceImage ?? null);
         setSelectedBid(response.objects[0]?.bid ?? null);
         clearBrowserPreviewUrl();
@@ -637,19 +695,6 @@ export default function LiveDetectionPage() {
     };
   }
 
-  async function previewFromBrowserCamera() {
-    if (!selectedCamera) {
-      throw new Error("請先選擇可用鏡頭");
-    }
-
-    const snapshot = await captureBrowserSnapshot(
-      selectedCamera,
-      performanceProfile.jpegQuality,
-      scaleDimension(videoRef.current?.videoWidth || 1280, performanceProfile.detectScale),
-    );
-    return previewDetection(snapshot.file);
-  }
-
   const browserFrame = useMemo(() => {
     if (!videoNativeSize.width || !videoNativeSize.height || !videoContainerSize.width || !videoContainerSize.height) {
       return null;
@@ -688,214 +733,76 @@ export default function LiveDetectionPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="flex flex-col min-h-screen bg-black text-slate-300 font-sans selection:bg-cyan-900 selection:text-cyan-100">
       <PageHeader
-        badge="鏡頭／裝置擷取"
-        title="即時辨識"
-        description="支援後端鏡頭與目前裝置本身鏡頭。啟動預覽後按下擷取，會將當前畫面送到後端辨識並存入批次紀錄。"
+        title="即時掃描"
+        description="Live Detection View"
         action={
-          <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={() => void refreshCameras()} disabled={isLoadingCameras || isCapturing}>
-              <CameraRotate size={16} />
-              重新掃描鏡頭
-            </Button>
-            {isPreviewing ? (
-              <Button variant="outline" onClick={stopPreview} disabled={isCapturing}>
-                <Stop size={16} />
-                停止預覽
-              </Button>
-            ) : (
-              <Button onClick={startPreview} disabled={!selectedCamera?.available || isCapturing}>
-                <Play size={16} />
-                開始即時辨識
-              </Button>
-            )}
-            <Button onClick={() => void captureCurrentFrame()} disabled={!selectedCamera?.available || isCapturing}>
-              <Camera size={16} />
-              {isCapturing ? "擷取中..." : "擷取並存檔辨識"}
+          <div className="flex items-center gap-3">
+            
+            <Button
+              onClick={handleToggleScan}
+              disabled={isSwitchingCamera}
+              variant={isScanningLive ? "destructive" : "default"}
+              size="sm"
+              className={
+                isScanningLive
+                  ? "bg-red-900/40 text-red-400 hover:bg-red-900/60 border border-red-800/50 uppercase tracking-wider font-semibold"
+                  : "bg-cyan-900/40 text-cyan-400 hover:bg-cyan-900/60 border border-cyan-800/50 uppercase tracking-wider font-semibold shadow-[0_0_15px_rgba(6,182,212,0.15)]"
+              }
+            >
+              {isSwitchingCamera ? (
+                <>
+                  <ArrowsClockwise className="mr-2 h-4 w-4 animate-spin" />
+                  切換中
+                </>
+              ) : isScanningLive ? (
+                <>
+                  <Stop className="mr-2 h-4 w-4" />
+                  停止掃描
+                </>
+              ) : (
+                <>
+                  <Play className="mr-2 h-4 w-4" />
+                  開始掃描
+                </>
+              )}
             </Button>
           </div>
         }
       />
 
-      <section className="grid gap-6 xl:grid-cols-[360px_1fr]">
-        <div className="space-y-6">
-          <SectionCard title="鏡頭來源" description="系統會列出目前可存取的後端鏡頭，以及瀏覽器所在設備本身的鏡頭。">
-            <div className="space-y-4 text-sm">
-              <div className="space-y-2">
-                <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">目前鏡頭</label>
-                <Select value={selectedCameraId || undefined} onValueChange={handleCameraChange} disabled={!cameras.length}>
-                  <SelectTrigger className="h-10 w-full px-3 text-sm">
-                    <SelectValue placeholder="目前沒有鏡頭" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {cameras.map((camera) => (
-                      <SelectItem key={camera.id} value={camera.id} disabled={!camera.available}>
-                        [{camera.sourceScope === "browser" ? "裝置" : "主機"}] {camera.label} {camera.available ? "" : "（不可用）"}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {isLoadingCameras
-                    ? "正在掃描鏡頭..."
-                    : cameras.length > 0
-                      ? `已偵測到 ${cameras.length} 個鏡頭（後端 ${cameras.filter((c) => c.sourceScope === "backend").length} 個，裝置 ${cameras.filter((c) => c.sourceScope === "browser").length} 個）`
-                      : "未偵測到任何鏡頭，請點擊「重新掃描鏡頭」"}
-                </p>
-                {error && !isLoadingCameras ? (
-                  <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                    ⚠ {error}
-                  </p>
-                ) : null}
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">效能模式</label>
-                <Select value={performanceMode} onValueChange={(value) => setPerformanceMode(value as PerformanceMode)}>
-                  <SelectTrigger className="h-10 w-full px-3 text-sm">
-                    <SelectValue placeholder="選擇效能模式" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="auto">自動（依裝置與網路偵測）</SelectItem>
-                    <SelectItem value="low">低耗能 — 省頻寬 / 弱網路</SelectItem>
-                    <SelectItem value="balanced">平衡 — 適合大多數場景</SelectItem>
-                    <SelectItem value="high">高效能 — 快速偵測 / 高解析</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {performanceMode === "auto"
-                    ? `自動已解析為「${PERFORMANCE_MODE_LABELS[autoResolvedMode]}」模式`
-                    : `最小周期 ${(performanceProfile.minCycleMs / 1000).toFixed(1)} 秒 / 品質 ${Math.round(performanceProfile.jpegQuality * 100)}%`}
-                </p>
-              </div>
-
-              {selectedCamera ? (
-                <div className="space-y-3 rounded-2xl border bg-background/50 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="font-medium">{selectedCamera.label}</p>
-                    <Badge variant={selectedCamera.available ? "success" : "outline"}>
-                      {selectedCamera.available ? "可用" : "不可用"}
-                    </Badge>
-                  </div>
-                  <p className="text-muted-foreground">範圍：{selectedCamera.sourceScope === "browser" ? "目前設備鏡頭" : "後端主機鏡頭"}</p>
-                  <p className="text-muted-foreground">來源：{selectedCamera.sourceType} / 編號 {selectedCamera.cameraNum}</p>
-                  <p className="text-muted-foreground">解析度：{selectedCamera.width} × {selectedCamera.height}</p>
-                  <p className="text-muted-foreground">
-                    模式：
-                    {performanceMode === "auto"
-                      ? `自動 → ${PERFORMANCE_MODE_LABELS[autoResolvedMode]}`
-                      : PERFORMANCE_MODE_LABELS[resolvedMode]}
-                  </p>
-                  <p className="text-muted-foreground">
-                    最小周期：{(performanceProfile.minCycleMs / 1000).toFixed(1)} 秒（偵測完成即進行下一張）
-                  </p>
-                  <p className="text-muted-foreground">
-                    {performanceTargetSize
-                      ? `預覽 ${performanceTargetSize.preview.width}×${performanceTargetSize.preview.height}（${Math.round(performanceProfile.previewScale * 100)}%）／辨識 ${performanceTargetSize.detect.width}×${performanceTargetSize.detect.height}（${Math.round(performanceProfile.detectScale * 100)}%）`
-                      : `預覽 ${Math.round(performanceProfile.previewScale * 100)}%／辨識 ${Math.round(performanceProfile.detectScale * 100)}%`}
-                  </p>
-                  {selectedCamera.status ? <p className="wrap-break-word text-xs text-muted-foreground">狀態：{selectedCamera.status}</p> : null}
-                </div>
-              ) : null}
-
-              {isPreviewing ? (
-                <div className="rounded-2xl border bg-muted/20 p-4">
-                  <div className="mb-2 flex items-center justify-between">
-                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">即時掃描狀態</p>
-                    {isScanningLive ? (
-                      <span className="flex items-center gap-1.5 text-xs font-medium text-sky-500">
-                        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-sky-500" />
-                        掃描中…
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                        <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
-                        待命
-                      </span>
-                    )}
-                  </div>
-                  <div className="space-y-2">
-                    {lastScanInfo ? (
-                      <>
-                        <p className="text-sm text-muted-foreground">最後掃描結果：<span className="font-medium text-foreground">{lastScanInfo.count} 個物件</span></p>
-                        <p className="text-sm text-muted-foreground">耗時：<span className="font-medium text-foreground">{lastScanInfo.elapsedMs} ms</span></p>
-                        <p className="text-sm text-muted-foreground">時刻：<span className="font-medium text-foreground">{lastScanInfo.at.toLocaleTimeString()}</span></p>
-                      </>
-                    ) : (
-                      <p className="text-sm text-muted-foreground">等待第一次掃描…</p>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <div className="rounded-2xl border bg-muted/20 p-4">
-                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">本次擷取摘要</p>
-                  <div className="space-y-2">
-                    <p className="text-sm text-muted-foreground">RID：<span className="font-medium text-foreground">{rid ?? "尚未擷取"}</span></p>
-                    <p className="text-sm text-muted-foreground">物件數量：<span className="font-medium text-foreground">{objects.length}</span></p>
-                    <p className="text-sm text-muted-foreground">目前選取：<span className="font-medium break-all text-foreground">{selectedObject?.bid ?? "無"}</span></p>
-                  </div>
-                </div>
-              )}
-
-              {error ? (
-                <div className="rounded-2xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-                  <div className="flex items-start gap-2">
-                    <WarningCircle size={18} className="mt-0.5 shrink-0" />
-                    <span>{error}</span>
-                  </div>
-                  <Button size="sm" variant="outline" className="mt-2" onClick={() => void refreshCameras()}>
-重新掃描鏡頭
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-          </SectionCard>
-        </div>
-
-        <div className="space-y-6">
-          <SectionCard
-            title="鏡頭畫面"
-            description="裝置鏡頭會直接顯示瀏覽器預覽；後端鏡頭則透過 API 取回最新影格。擷取後會顯示已存檔的辨識結果影像。"
-            action={
-              <Button size="sm" variant="outline" onClick={() => void toggleFullscreen()}>
-                {isFullscreen ? <ArrowsIn size={16} /> : <ArrowsOut size={16} />}
-                {isFullscreen ? "離開全螢幕" : "全螢幕"}
-              </Button>
-            }
-          >
-            <div className="mb-4 flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                variant={showBoundingBoxes ? "default" : "outline"}
-                onClick={() => setShowBoundingBoxes((current) => !current)}
+      <main className="flex-1 p-6 z-10 relative">
+        <div className="mx-auto max-w-7xl space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-8 flex flex-col gap-6">
+              <div
+                className="group relative overflow-hidden rounded-xl border border-cyan-900/30 bg-black/40 shadow-[0_0_30px_rgba(6,182,212,0.03)] transition-all duration-300 hover:border-cyan-700/50 hover:shadow-[0_0_40px_rgba(6,182,212,0.06)] ring-1 ring-white/5"
+                style={{
+                  backgroundImage:
+                    "radial-gradient(ellipse at top, rgba(6, 182, 212, 0.05), transparent 70%)",
+                }}
               >
-                {showBoundingBoxes ? "隱藏物件框" : "顯示物件框"}
-              </Button>
-              <Button
-                size="sm"
-                variant={showDecodeInfo ? "default" : "outline"}
-                onClick={() => setShowDecodeInfo((current) => !current)}
-                disabled={!showBoundingBoxes}
-              >
-                {showDecodeInfo ? "隱藏 BID" : "顯示 BID"}
-              </Button>
-            </div>
-            <div ref={liveDisplayRef} className={isFullscreen ? "rounded-2xl bg-background p-4" : undefined}>
-            {isPreviewing && selectedCamera?.sourceScope === "browser" ? (
-              <div className="relative overflow-hidden rounded-3xl border bg-card/70 p-3 shadow-sm">
-                {isScanningLive ? (
-                  <div className="absolute right-5 top-5 z-30 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm">
-                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" />
-                    掃描中
+                <div className="border-b border-cyan-900/30 bg-black/40 px-4 py-3 relative overflow-hidden flex justify-between items-center">
+                  <div className="absolute inset-x-0 top-0 h-px bg-linear-to-r from-transparent via-cyan-500/20 to-transparent"></div>
+                  <div className="flex items-center gap-3">
+                    <Camera className="h-4 w-4 text-cyan-500" />
+                    <h2 className="text-sm font-semibold tracking-wide text-cyan-100 uppercase">
+                      鏡頭畫面
+                    </h2>
                   </div>
-                ) : lastScanInfo ? (
-                  <div className="absolute right-5 top-5 z-30 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm">
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                    {lastScanInfo.count > 0 ? `找到 ${lastScanInfo.count} 個` : "未偵測到"} · {lastScanInfo.elapsedMs}ms
-                  </div>
-                ) : null}
-                <div ref={videoContainerRef} className={`relative min-h-80 overflow-hidden rounded-2xl bg-[linear-gradient(135deg,#f8fafc,#dbeafe)] dark:bg-[linear-gradient(135deg,#0f172a,#1e293b)] ${previewViewportClassName ?? "h-[min(62vh,40rem)]"}`}>
+                  {isScanningLive && (
+                    <div className="flex items-center gap-2">
+                        <span className="relative flex h-2 w-2">
+                           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                           <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                        </span>
+                        <span className="text-xs font-medium text-red-400 uppercase tracking-widest">LIVE</span>
+                    </div>
+                  )}
+                </div>
+                <div className="relative aspect-video w-full bg-[#050505] overflow-hidden flex items-center justify-center min-h-100">
+                  <div ref={videoContainerRef} className="relative aspect-video w-full overflow-hidden min-h-100 border border-cyan-800/10 rounded-lg">
                   <video
                     ref={videoRef}
                     className="relative z-0 h-full w-full object-contain"
@@ -911,122 +818,128 @@ export default function LiveDetectionPage() {
                   />
 
                   <div className="pointer-events-none absolute inset-0 z-20">
-                    {showBoundingBoxes && browserFrame && liveOverlaySourceSize
-                      ? objects.map((item) => {
-                          const bw = Math.max(item.bbox.x2 - item.bbox.x1, 12);
-                          const bh = Math.max(item.bbox.y2 - item.bbox.y1, 12);
-                          const active = item.bid === selectedBid;
-                          const overlayLines = buildOverlayLines(item, showDecodeInfo);
+                    {showBoundingBoxes && browserFrame && liveOverlaySourceSize && objects ? objects.map((item) => {
+                      const bw = Math.max(item.bbox.x2 - item.bbox.x1, 12);
+                      const bh = Math.max(item.bbox.y2 - item.bbox.y1, 12);
+                      const active = item.bid === selectedObject?.bid;
+                      const overlayLines = buildOverlayLines(item, showDecodeInfo);
 
-                          return (
-                            <button
-                              key={item.bid}
-                              type="button"
-                              onClick={() => setSelectedBid(item.bid)}
-                              className={`pointer-events-auto absolute rounded-xl border-2 text-left outline-none transition-all ${active ? "border-sky-400 shadow-[0_0_0_9999px_rgba(15,23,42,0.12)]" : "border-emerald-400/90 hover:border-emerald-300"}`}
-                              style={{
-                                left: browserFrame.left + (item.bbox.x1 / liveOverlaySourceSize.width) * browserFrame.width,
-                                top: browserFrame.top + (item.bbox.y1 / liveOverlaySourceSize.height) * browserFrame.height,
-                                width: (bw / liveOverlaySourceSize.width) * browserFrame.width,
-                                height: (bh / liveOverlaySourceSize.height) * browserFrame.height,
-                              }}
-                            >
-                              {overlayLines.length > 0 ? (
-                                <span className="absolute -top-2 left-0 min-w-16 max-w-72 -translate-y-full truncate whitespace-nowrap rounded-full bg-background/95 px-2.5 py-1 text-[10px] font-medium shadow-sm">
-                                  {overlayLines.map((line) => (
-                                    <span key={line} className="block truncate leading-tight">
-                                      {line}
-                                    </span>
-                                  ))}
+                      return (
+                        <button
+                          key={item.bid}
+                          type="button"
+                          onClick={() => setSelectedObject(item)}
+                          className={`pointer-events-auto absolute rounded-xl border-2 text-left outline-none transition-all ${
+                            active
+                              ? "border-cyan-400 shadow-[0_0_0_9999px_rgba(6,182,212,0.12)] bg-cyan-400/10 z-30"
+                              : "border-cyan-500/90 hover:border-cyan-300 bg-cyan-500/10 z-20"
+                          }`}
+                          style={{
+                            left: browserFrame.left + (item.bbox.x1 / liveOverlaySourceSize.width) * browserFrame.width,
+                            top: browserFrame.top + (item.bbox.y1 / liveOverlaySourceSize.height) * browserFrame.height,
+                            width: (bw / liveOverlaySourceSize.width) * browserFrame.width,
+                            height: (bh / liveOverlaySourceSize.height) * browserFrame.height,
+                          }}
+                        >
+                          {overlayLines.length > 0 ? (
+                            <span className="absolute -top-2 left-0 min-w-16 max-w-72 -translate-y-full truncate whitespace-nowrap rounded border border-cyan-500/50 bg-black/90 px-2.5 py-1 text-[10px] font-mono shadow-[0_0_10px_rgba(6,182,212,0.2)] text-cyan-300">
+                              {overlayLines.map((line) => (
+                                <span key={line} className="block truncate leading-tight">
+                                  {line}
                                 </span>
-                              ) : null}
-                            </button>
-                          );
-                        })
-                      : null}
+                              ))}
+                            </span>
+                          ) : null}
+                        </button>
+                      );
+                    }) : null}
                   </div>
                 </div>
+                </div>
               </div>
-            ) : (
-              <div className="relative">
-                {isPreviewing && selectedCamera?.sourceScope === "backend" && (
-                  isScanningLive ? (
-                    <div className="absolute right-5 top-5 z-30 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm">
-                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" />
-                      掃描中
-                    </div>
-                  ) : lastScanInfo ? (
-                    <div className="absolute right-5 top-5 z-30 flex items-center gap-1.5 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-sm">
-                      <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                      {stableObjects.length > 0 ? `已鎖定 ${stableObjects.length} 個` : "未偵測到"} · {lastScanInfo.elapsedMs}ms
-                    </div>
-                  ) : null
-                )}
-                <DetectionCanvas
-                  imageUrl={isPreviewing && selectedCamera?.sourceScope === "backend" ? streamUrl : previewUrl}
-                  objects={isPreviewing ? stableObjects : objects}
-                  selectedBid={selectedBid}
-                  onSelect={setSelectedBid}
-                  sourceImageSize={overlaySourceSize}
-                  showBoundingBoxes={showBoundingBoxes}
-                  showDecodeInfo={showDecodeInfo}
-                  viewportClassName={previewViewportClassName}
-                />
-              </div>
-            )}
             </div>
-          </SectionCard>
 
-          <SectionCard title="辨識結果列表" description="按下擷取後，當前影格的辨識結果會存入後端資料庫。">
-            {(isPreviewing ? stableObjects : objects).length ? (
-              <ObjectResultTable items={isPreviewing ? stableObjects : objects} selectedBid={selectedBid} onSelect={setSelectedBid} />
-            ) : (
-              <EmptyState
-                title={isLoadingCameras ? "正在載入鏡頭" : "尚未取得即時辨識結果"}
-                description="開始即時辨識後，系統會持續把物件框選結果回傳到前端顯示；按下擷取才會正式存入資料庫。"
-              />
-            )}
-          </SectionCard>
+            <div className="lg:col-span-4 flex flex-col gap-6">
+              {selectedCamera && (
+                <div className="overflow-hidden rounded-xl border border-cyan-900/30 bg-black/40 p-5 shadow-[0_0_30px_rgba(6,182,212,0.03)] ring-1 ring-white/5 relative group">
+                  <div className="absolute inset-0 bg-linear-to-br from-cyan-950/10 via-transparent to-transparent opacity-0 transition-opacity duration-500 group-hover:opacity-100"></div>
+
+                  <div className="flex items-center justify-between mb-4 relative z-10">
+                    <div className="flex items-center gap-2">
+                      <SlidersHorizontal className="h-4 w-4 text-cyan-500" />
+                      <h3 className="text-sm font-semibold text-cyan-100 uppercase tracking-wider">
+                        鏡頭資訊
+                      </h3>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 relative z-10">
+                    <div className="rounded-lg border border-cyan-900/20 bg-black/50 p-3">
+                      <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80 mb-1">
+                        選擇的鏡頭
+                      </p>
+                      <p className="text-sm font-medium text-cyan-50">
+                        {selectedCamera?.label || selectedCameraId}
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-cyan-900/20 bg-black/50 p-3 flexItems-center justify-between">
+                       <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80">連線狀態</p>
+                       <span className="flex items-center gap-1.5 text-xs font-medium text-cyan-400">
+                          <span className="inline-block h-1.5 w-1.5 rounded-full bg-cyan-400"></span>
+                          ONLINE
+                       </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+               <div className="overflow-hidden rounded-xl border border-cyan-900/30 bg-black/40 p-5 shadow-[0_0_30px_rgba(6,182,212,0.03)] ring-1 ring-white/5 relative group">
+                   <div className="absolute inset-0 bg-linear-to-br from-cyan-950/10 via-transparent to-transparent opacity-0 transition-opacity duration-500 group-hover:opacity-100"></div>
+
+                   <div className="flex items-center justify-between mb-4 relative z-10">
+                    <div className="flex items-center gap-2">
+                      <Pulse className="h-4 w-4 text-cyan-500" />
+                      <h3 className="text-sm font-semibold text-cyan-100 uppercase tracking-wider">
+                        掃描狀態
+                      </h3>
+                    </div>
+                  </div>
+                   <div className="space-y-4 relative z-10">
+                    <div className="rounded-lg border border-cyan-900/20 bg-black/50 p-3 flex items-center justify-between">
+                       <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80">目前狀態</p>
+                       {isScanningLive ? (
+                           <span className="flex items-center gap-1.5 text-xs font-bold text-red-500 tracking-wider">
+                                <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse"></span>
+                                SCANNING
+                           </span>
+                       ) : (
+                           <span className="flex items-center gap-1.5 text-xs font-medium text-slate-500 tracking-wider">
+                                <span className="inline-block h-1.5 w-1.5 rounded-full bg-slate-500"></span>
+                                IDLE
+                           </span>
+                       )}
+                    </div>
+                    {isScanningLive && (
+                        <div className="rounded-lg border border-cyan-900/20 bg-black/50 p-3">
+                            <p className="text-xs font-medium uppercase tracking-wide text-cyan-700/80 mb-2">更新頻率</p>
+                            <div className="flex items-center gap-3">
+                                <div className="h-1.5 flex-1 bg-black rounded-full overflow-hidden">
+                                     <div className="h-full bg-cyan-500/50 w-full animate-[pulse_1s_ease-in-out_infinite]"></div>
+                                </div>
+                                <span className="text-[10px] text-cyan-500/70 font-mono">15fps (est)</span>
+                            </div>
+                        </div>
+                    )}
+                   </div>
+               </div>
+            </div>
+          </div>
+
+          <div className="w-full mt-8">
+             <ObjectResultTable items={objects} selectedBid={selectedBid} onSelect={(bid) => setSelectedBid(bid)} />
+          </div>
         </div>
-      </section>
+      </main>
     </div>
   );
-}
-
-async function getBrowserCameras(): Promise<LiveCameraOption[]> {
-  if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
-    return [];
-  }
-
-  // mediaDevices API requires a secure context (HTTPS or localhost).
-  // On Pi accessed via http://192.168.x.x:3000, this will be unavailable.
-  if (typeof window !== "undefined" && !window.isSecureContext) {
-    return [];
-  }
-
-  try {
-    // enumerateDevices() can hang on some browsers/platforms (e.g. Pi Chromium
-    // waiting for a permission dialog). Apply a 5-second timeout.
-    const devicesPromise = navigator.mediaDevices.enumerateDevices();
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("enumerateDevices timeout")), 5_000),
-    );
-    const devices = await Promise.race([devicesPromise, timeoutPromise]);
-    const videoInputs = devices.filter((device) => device.kind === "videoinput");
-
-    return videoInputs.map((device, index) => ({
-      id: `browser-${device.deviceId || index}`,
-      label: device.label || `設備鏡頭 ${index + 1}`,
-      sourceType: "browser",
-      sourceScope: "browser",
-      deviceId: device.deviceId,
-      cameraNum: index,
-      width: 1280,
-      height: 720,
-      available: true,
-      status: device.label ? "可直接使用" : "首次使用時將要求鏡頭權限",
-    }));
-  } catch {
-    return [];
-  }
 }

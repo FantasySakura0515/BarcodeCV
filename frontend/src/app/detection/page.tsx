@@ -21,6 +21,13 @@ export default function DetectionPage() {
 
   const selectedObject = objects.find((item) => item.bid === selectedBid) ?? null;
 
+  const handleFileSelect = (file: File | null) => {
+    clear();
+    if (file) {
+      setImageFile(file);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -41,98 +48,120 @@ export default function DetectionPage() {
         }
       />
 
-      <section className="grid gap-6 xl:grid-cols-[360px_1fr]">
-        <div className="space-y-6">
-          <UploadDropzone onFileSelect={setImageFile} fileName={imageFile?.name} />
+      <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
+        <div className="flex flex-col space-y-6">
+          <UploadDropzone onFileSelect={handleFileSelect} fileName={imageFile?.name} />
 
-          <SectionCard title="批次摘要" description="目前批次狀態與所選物件資訊。">
-            <div className="space-y-3 text-sm">
-              <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2">
-                <span className="text-muted-foreground">批次 ID（RID）</span>
-                <span className="font-medium">{rid ?? "尚未開始"}</span>
+          <SectionCard title="掃描摘要" description="目前分析狀態與所選目標。" className="shrink-0 border-[#00f0ff]/20 bg-[#0b0c10]/60 backdrop-blur-md">
+            <div className="space-y-3 text-sm font-mono">
+              <div className="flex items-center justify-between rounded border border-[#334155] bg-[#1a202c]/50 px-3 py-2">
+                <span className="text-[#94a3b8]">批次處理號</span>
+                <span className="font-semibold text-[#00f0ff]">{rid ?? "等待中..."}</span>
               </div>
-              <div className="flex items-center justify-between rounded-xl bg-muted/50 px-3 py-2">
-                <span className="text-muted-foreground">偵測物件數</span>
-                <span className="font-medium">{objects.length}</span>
+              <div className="flex items-center justify-between rounded border border-[#334155] bg-[#1a202c]/50 px-3 py-2">
+                <span className="text-[#94a3b8]">已偵測物件</span>
+                <span className="font-semibold text-[#00ff66]">{objects.length} 個</span>
               </div>
-              <div className="rounded-xl border bg-background p-4">
-                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">目前選取物件</p>
+              <div className="rounded border border-[#334155] bg-[#1a202c]/80 p-4 shadow-[inset_0_0_10px_#000000]">
+                <p className="mb-2 text-[10px] font-bold tracking-[0.2em] text-[#00f0ff] flex items-center gap-2">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#00f0ff] animate-pulse" />
+                  目標已鎖定
+                </p>
                 {selectedObject ? (
                   <div className="space-y-2">
-                    <p className="break-all font-mono text-sm font-semibold">{selectedObject.bid}</p>
-                    <p className="break-all text-sm text-muted-foreground">條碼：{selectedObject.barcodeValue ?? "未偵測到"}</p>
-                    <p className="wrap-break-word text-sm text-muted-foreground">OCR：{selectedObject.ocrText ?? "無"}</p>
+                    <p className="break-all text-xs font-semibold text-white">{selectedObject.bid}</p>
+                    <p className="break-all text-sm">
+                      <span className="text-[#94a3b8]">解碼結果: </span>
+                      <span className={selectedObject.barcodeValue ? "text-[#00ff66]" : "text-[#ef4444]"}>
+                        {selectedObject.barcodeValue ?? "無法解析"}
+                      </span>
+                    </p>
                   </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground">尚未選取物件。</p>
+                  <p className="text-xs text-[#94a3b8] italic">尚未選取任何物件。</p>
                 )}
               </div>
-              {error ? (
-                <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3">
-                  <p className="text-sm text-destructive">{error}</p>
-                  <Button size="sm" variant="outline" className="mt-2" onClick={() => submitDetection()} disabled={!imageFile || isLoading}>
-                    重試
+              {error && (
+                <div className="rounded border border-[#ef4444]/50 bg-[#ef4444]/10 p-3">
+                  <p className="text-xs text-[#ef4444] mb-2">{error}</p>
+                  <Button size="sm" variant="destructive" onClick={() => submitDetection()} disabled={!imageFile || isLoading}>
+                    重新執行分析
                   </Button>
                 </div>
-              ) : null}
+              )}
             </div>
           </SectionCard>
         </div>
 
-        <div className="space-y-6">
-          <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-            <SectionCard
-              title="辨識影像"
-              description="可切換是否顯示物件框與解碼資訊，方便比對原圖。"
-              action={
-                <div className="flex flex-wrap gap-2">
+        <div className="flex flex-col min-h-[500px]">
+          <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="h-full relative group">
+            <div className="absolute inset-0 rounded-[0.5rem] border border-[#00f0ff]/30 bg-[#0b0c10] shadow-[0_0_20px_rgba(0,240,255,0.05)] overflow-hidden flex flex-col">
+              <div className="h-10 border-b border-[#00f0ff]/20 bg-[#00f0ff]/5 flex items-center px-4 justify-between shrink-0">
+                <div className="flex gap-2 items-center">
+                  <span className="block w-2 h-2 bg-[#ef4444] rounded-full"></span>
+                  <span className="block w-2 h-2 bg-[#f59e0b] rounded-full"></span>
+                  <span className="block w-2 h-2 bg-[#00ff66] rounded-full"></span>
+                  <span className="ml-2 text-[11px] font-mono font-bold text-[#00f0ff] tracking-widest">影像視覺化分析平台</span>
+                </div>
+                <div className="flex gap-2">
                   <Button
                     size="sm"
+                    className="h-6 text-[10px] px-2 rounded font-mono"
                     variant={showBoundingBoxes ? "default" : "outline"}
                     onClick={() => setShowBoundingBoxes((current) => !current)}
                   >
-                    {showBoundingBoxes ? "隱藏物件框" : "顯示物件框"}
+                    {showBoundingBoxes ? "隱藏外框" : "顯示外框"}
                   </Button>
                   <Button
                     size="sm"
+                    className="h-6 text-[10px] px-2 rounded font-mono"
                     variant={showDecodeInfo ? "default" : "outline"}
                     onClick={() => setShowDecodeInfo((current) => !current)}
                     disabled={!showBoundingBoxes}
                   >
-                    {showDecodeInfo ? "隱藏 BID" : "顯示 BID"}
+                    {showDecodeInfo ? "隱藏編號" : "顯示編號"}
                   </Button>
                 </div>
-              }
-            >
-              <DetectionCanvas
-                imageUrl={imageUrl}
-                objects={objects}
-                selectedBid={selectedBid}
-                onSelect={setSelectedBid}
-                showBoundingBoxes={showBoundingBoxes}
-                showDecodeInfo={showDecodeInfo}
-              />
-            </SectionCard>
+              </div>
+              <div className="flex-1 relative bg-[url('/grid-pattern.svg')] bg-center bg-repeat bg-[size:20px_20px] overflow-hidden">
+                <DetectionCanvas
+                  imageUrl={imageUrl}
+                  objects={objects}
+                  selectedBid={selectedBid}
+                  onSelect={setSelectedBid}
+                  showBoundingBoxes={showBoundingBoxes}
+                  showDecodeInfo={showDecodeInfo}
+                />
+                {/* Techy overlay corners */}
+                <div className="absolute top-0 left-0 w-8 h-8 border-t-2 border-l-2 border-[#00f0ff] pointer-events-none md:m-4" />
+                <div className="absolute top-0 right-0 w-8 h-8 border-t-2 border-r-2 border-[#00f0ff] pointer-events-none md:m-4" />
+                <div className="absolute bottom-0 left-0 w-8 h-8 border-b-2 border-l-2 border-[#00f0ff] pointer-events-none md:m-4" />
+                <div className="absolute bottom-0 right-0 w-8 h-8 border-b-2 border-r-2 border-[#00f0ff] pointer-events-none md:m-4" />
+              </div>
+            </div>
           </motion.div>
-
-          <SectionCard
-            title="辨識結果"
-            description="物件清單與方框選取會保持同步。"
-            action={
-              <Button variant="outline" disabled={!objects.length}>
-                <DownloadSimple size={16} />
-                匯出
-              </Button>
-            }
-          >
-            {objects.length ? (
-              <ObjectResultTable items={objects} selectedBid={selectedBid} onSelect={setSelectedBid} />
-            ) : (
-              <EmptyState title="尚無辨識結果" description="請先上傳影像並執行辨識，即可查看物件層級結果。" />
-            )}
-          </SectionCard>
         </div>
-      </section>
+      </div>
+
+      <div className="w-full">
+        <SectionCard
+          title="分析矩陣"
+          description="系統擷取的物件與特徵資料清單。"
+          className="w-full border-[#334155]/50 bg-[#161b22]/80"
+          action={
+            <Button variant="outline" size="sm" disabled={!objects.length} className="h-7 text-[10px] border-[#00f0ff]/30 text-[#00f0ff] hover:bg-[#00f0ff]/10 tracking-widest font-mono">
+              <DownloadSimple size={14} className="mr-1" />
+              匯出資料
+            </Button>
+          }
+        >
+          {objects.length ? (
+            <ObjectResultTable items={objects} selectedBid={selectedBid} onSelect={setSelectedBid} />
+          ) : (
+            <EmptyState title="等待影像載入" description="系統尚未取得目標資料，請上傳並執行掃描程序" />
+          )}
+        </SectionCard>
+      </div>
     </div>
   );
 }

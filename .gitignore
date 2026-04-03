@@ -25,6 +25,10 @@ env/
 *.swp
 *.swo
 
+# Frontend workspace artifacts
+frontend/.next/
+frontend/node_modules/
+
 # macOS
 .DS_Store
 .DS_Store?

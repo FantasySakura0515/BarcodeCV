@@ -221,8 +221,22 @@ class OpenCVDataMatrixDetector:
 		For small ROIs (≤200×200 px) all variants complete in < 10ms total.
 		Returns a list of pre-processed images (up to max_roi_scan_variants).
 		"""
+		roi_h, roi_w = roi.shape[:2]
+
+		# Start from the most likely recoveries for label-style ROIs:
+		# barcode on top + text on the lower band.
+		focused_fns: list = [lambda: roi]
+		if roi_w >= int(roi_h * 1.12):
+			focused_fns.extend([
+				lambda: self._mask_lower_text_band(roi, keep_ratio=0.62),
+				lambda: self._resize_variant(
+					self._mask_lower_text_band(roi, keep_ratio=0.62),
+					scale=2.5,
+				),
+				lambda: self._mask_lower_text_band(roi, keep_ratio=0.72),
+			])
+
 		standard_fns: list = [
-			lambda: roi,
 			lambda: self._enhance_from_gray(gray),
 			lambda: self._unsharp_mask_gray(gray),
 			lambda: self._invert_variant(roi),
@@ -231,12 +245,10 @@ class OpenCVDataMatrixDetector:
 			lambda: self._morphological_sharpen_gray(gray),
 			lambda: self._jpeg_artifact_variant_gray(gray),
 		]
-		# Upscale variants: put FIRST so a small budget (max_roi_scan_variants=5)
-		# still reaches them.  Previously they were appended after 8 standard
-		# variants and were never reached in fast mode.
+
+		# Generic upscale variants come AFTER focused recovery variants.
 		side = min(roi.shape[:2])
 		if side < 64:
-			# Tiny ROI — zxing needs ≥ 2 px/module; 3× upscale is mandatory.
 			upscale_fns = [
 				lambda: self._resize_variant(roi, scale=3.0),
 				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=3.0),
@@ -244,25 +256,23 @@ class OpenCVDataMatrixDetector:
 				lambda: self._resize_variant(roi, scale=2.0),
 				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
 			]
-			variant_fns = upscale_fns + standard_fns
+			variant_fns = focused_fns + upscale_fns + standard_fns
 		elif side < 160:
-			# Small ROI — 2× upscale first.
 			upscale_fns = [
 				lambda: self._resize_variant(roi, scale=2.0),
 				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
 				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=2.0),
 				lambda: self._resize_variant(self._jpeg_artifact_variant_gray(gray), scale=2.0),
 			]
-			variant_fns = upscale_fns + standard_fns
+			variant_fns = focused_fns + upscale_fns + standard_fns
 		elif side < 320:
-			# Moderately small — prepend 2× but keep standard variants available.
 			upscale_fns = [
 				lambda: self._resize_variant(roi, scale=2.0),
 				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
 			]
-			variant_fns = upscale_fns + standard_fns
+			variant_fns = focused_fns + upscale_fns + standard_fns
 		else:
-			variant_fns = standard_fns
+			variant_fns = focused_fns + standard_fns
 		# Evaluate eagerly — only as many as we'll actually scan.
 		return [fn() for fn in variant_fns[: self._max_roi_scan_variants]]
 
@@ -594,47 +604,9 @@ class OpenCVDataMatrixDetector:
 		if gray is None:
 			gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
 
-		standard_variants: list = [
-			lambda: roi,
-			lambda: self._enhance_from_gray(gray),
-			lambda: self._unsharp_mask_gray(gray),
-			lambda: self._invert_variant(roi),
-			lambda: self._bilateral_variant_gray(gray),
-			lambda: self._invert_variant(self._enhance_from_gray(gray)),
-			lambda: self._morphological_sharpen_gray(gray),
-			lambda: self._jpeg_artifact_variant_gray(gray),
-		]
-		# Upscale variants — prepended (not appended) so they're tried first on
-		# small ROIs even when max_roi_scan_variants is low (e.g. 5 in live mode).
-		side = min(roi.shape[:2])
-		if side < 64:
-			upscale_fns = [
-				lambda: self._resize_variant(roi, scale=3.0),
-				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=3.0),
-				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=3.0),
-				lambda: self._resize_variant(roi, scale=2.0),
-				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
-			]
-			variants = upscale_fns + standard_variants
-		elif side < 160:
-			upscale_fns = [
-				lambda: self._resize_variant(roi, scale=2.0),
-				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
-				lambda: self._resize_variant(self._unsharp_mask_gray(gray), scale=2.0),
-				lambda: self._resize_variant(self._jpeg_artifact_variant_gray(gray), scale=2.0),
-			]
-			variants = upscale_fns + standard_variants
-		elif side < 320:
-			upscale_fns = [
-				lambda: self._resize_variant(roi, scale=2.0),
-				lambda: self._resize_variant(self._enhance_from_gray(gray), scale=2.0),
-			]
-			variants = upscale_fns + standard_variants
-		else:
-			variants = standard_variants
+		variants = self._precompute_roi_variant_images(roi, gray)
 		roi_h, roi_w = roi.shape[:2]
-		for variant_fn in variants[: self._max_roi_scan_variants]:
-			var_img = variant_fn()
+		for var_img in variants:
 			decoded = self._scanner.scan(var_img)
 			successful = [item for item in decoded if item.success and item.content]
 			if successful:
@@ -653,6 +625,27 @@ class OpenCVDataMatrixDetector:
 						)
 				return successful
 		return []
+
+	@staticmethod
+	def _mask_lower_text_band(image: np.ndarray, keep_ratio: float = 0.62) -> np.ndarray:
+		"""Suppress lower text-heavy band in label-like ROI images.
+
+		For barcodes printed above human-readable text, removing the lower band
+		reduces interference while keeping barcode geometry intact.
+		"""
+		h, _w = image.shape[:2]
+		if h <= 1:
+			return image
+
+		cut = int(round(h * keep_ratio))
+		cut = max(1, min(h - 1, cut))
+
+		masked = image.copy()
+		if len(masked.shape) == 2:
+			masked[cut:, :] = 255
+		else:
+			masked[cut:, :, :] = 255
+		return masked
 
 	def _scan_full_frame_variants(self, image: np.ndarray) -> list:
 		"""Try multiple preprocessing variants on the full frame.
@@ -1021,7 +1014,7 @@ class OpenCVDataMatrixDetector:
 				blur_kernel_size=detector_cfg.get("blur_kernel_size", 5),
 				aspect_ratio_min=detector_cfg.get("aspect_ratio_min", 0.5),
 				aspect_ratio_max=detector_cfg.get("aspect_ratio_max", 2.0),
-				padding=detector_cfg.get("padding", 20),
+				padding=detector_cfg.get("padding", 16),
 				# Fast mode: cap at 35 candidates — 150 candidates × variants is the
 				# main cause of 50+ second latency.  35 well-ranked candidates
 				# (sorted by area descending) covers almost all real DataMatrix codes.
@@ -1074,7 +1067,7 @@ class OpenCVDataMatrixDetector:
 			blur_kernel_size=detector_cfg.get("blur_kernel_size", 5),
 			aspect_ratio_min=detector_cfg.get("aspect_ratio_min", 0.5),
 			aspect_ratio_max=detector_cfg.get("aspect_ratio_max", 2.0),
-			padding=detector_cfg.get("padding", 20),
+			padding=detector_cfg.get("padding", 16),
 			# Batch: 70 candidates is thorough without triggering 7×70=490 sequential calls.
 			# Flat parallel pool handles all 490 tasks across workers simultaneously.
 			max_candidates=detector_cfg.get("max_candidates", 70),

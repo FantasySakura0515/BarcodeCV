@@ -212,6 +212,8 @@ class CameraService:
                                 frame_q.put_nowait(enc.tobytes())
                             except _queue.Full:
                                 pass  # drop frame; client is slow
+            except Exception as exc:
+                logger.error("Failed to initialize or run camera %s: %s", camera_id, exc)
             finally:
                 lock.release()
                 with _ACTIVE_STREAMS_MU:

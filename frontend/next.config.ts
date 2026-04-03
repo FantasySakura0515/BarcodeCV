@@ -18,6 +18,7 @@ function backendRemotePattern() {
 }
 
 const nextConfig: NextConfig = {
+  transpilePackages: ["tailwindcss"],
   images: {
     remotePatterns: [
       backendRemotePattern(),

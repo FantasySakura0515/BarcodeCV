@@ -71,6 +71,8 @@ box_detection:
   approx_epsilon: 0.02    # polygon approximation precision (fraction of perimeter)
   aspect_ratio_min: 0.5   # use max(w,h)/min(w,h), so box-like rectangles stay near 1
   aspect_ratio_max: 2.4
+  square_ratio_max: 1.35  # square-first pass: prioritize near-square candidates for DataMatrix
+  square_candidate_limit: 180
 
 spatial_matching:
   overlap_threshold: 0.3  # minimum IoU to count a DataMatrix as inside a box
@@ -87,8 +89,9 @@ opencv_datamatrix:
   blur_kernel_size: 5
   aspect_ratio_min: 0.4
   aspect_ratio_max: 2.5
-  padding: 25
+  padding: 16
   max_candidates: 150
   clahe_clip_limit: 3.0
   fallback_full_image: true
   min_output_confidence: 0.45
+  supplement_when_mismatch: true  # when decoded count < square box count, run fallback supplement scan

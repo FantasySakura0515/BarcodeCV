@@ -5,12 +5,31 @@ can scan an entire image and find multiple DataMatrix codes directly.
 """
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 
 import numpy as np
 
 logger = logging.getLogger("barcodecv.scanner")
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1F\x7F]")
+
+
+def sanitize_decoded_text(value: str | bytes | None) -> str:
+    """Normalize decoded barcode text for downstream dedup/storage.
+
+    Some scanner backends may return trailing NULL/control chars (e.g. "\\x00"),
+    which should not be exposed in API/UI and would break dedup logic.
+    """
+    if value is None:
+        return ""
+
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="ignore")
+    else:
+        text = str(value)
+
+    return _CONTROL_CHARS_RE.sub("", text).strip()
 
 
 @dataclass
@@ -89,7 +108,9 @@ class PylibdmtxScanner:
             results = []
             image_height = image.shape[0]
             for item in decoded:
-                content = item.data.decode("utf-8")
+                content = sanitize_decoded_text(item.data)
+                if not content:
+                    continue
                 # pylibdmtx returns Rect(left, top, width, height)
                 # `top` is measured from the image bottom, so convert it back
                 # to OpenCV's top-left origin before exposing the bbox.
@@ -180,7 +201,7 @@ class ZxingScanner:
                     binarizer=binarizer,
                 )
                 for barcode in barcodes:
-                    text = barcode.text
+                    text = sanitize_decoded_text(barcode.text)
                     if not text or text in all_contents:
                         continue
                     all_contents.add(text)
