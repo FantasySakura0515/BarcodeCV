@@ -362,6 +362,12 @@ def debug_cameras() -> dict:
     if diagnostics.get("global_camera_info_error") and not diagnostics.get("global_camera_info"):
         suggested_fixes.append("libcamera-hello --list-cameras")
 
+    if isinstance(diagnostics.get("global_camera_info"), list) and not diagnostics.get("global_camera_info"):
+        suggested_fixes.append("libcamera-hello --list-cameras  # 若為空，請檢查 CSI 排線與 /boot/firmware/config.txt")
+        suggested_fixes.append(
+            "若使用 USB/UVC Arducam，請在 config/default.yaml 將 cameras.*.allow_opencv_fallback 設為 true"
+        )
+
     global_camera_info = diagnostics.get("global_camera_info")
     if isinstance(global_camera_info, list):
         available_nums: list[int] = []

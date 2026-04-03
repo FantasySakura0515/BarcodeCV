@@ -515,7 +515,16 @@ class CameraService:
             # Prefer Picamera2 whenever available, regardless of platform
             # detection heuristics. This avoids misrouting CSI cameras to V4L2.
             if _is_picamera2_available():
-                picam_ok, picam_status = self._probe_picamera(camera_num)
+                available_cams = PiCameraSource.available_cameras()
+                if not available_cams:
+                    # picamera2 is installed but no CSI camera appears in libcamera.
+                    # This commonly means USB/UVC mode or camera stack misconfiguration.
+                    opencv_ok, opencv_status = self._probe_opencv(camera_num)
+                    if opencv_ok:
+                        return True, f"opencv fallback (no picamera cameras): {opencv_status}"
+                    return False, f"picamera=no cameras; opencv={opencv_status}"
+
+                picam_ok, picam_status = self._probe_picamera(camera_num, available_cams)
                 if picam_ok:
                     return True, picam_status
 
@@ -541,10 +550,11 @@ class CameraService:
             return self._probe_opencv(camera_num)
         return self._probe_picamera(camera_num)
 
-    def _probe_picamera(self, camera_num: int) -> tuple[bool, str | None]:
+    def _probe_picamera(self, camera_num: int, available_cams: list[dict] | None = None) -> tuple[bool, str | None]:
         """Probe a PiCamera by first checking global_camera_info, then opening."""
         # Step 1: non-invasive check — picamera2 can list cameras without opening them
-        available_cams = PiCameraSource.available_cameras()
+        if available_cams is None:
+            available_cams = PiCameraSource.available_cameras()
         logger.info("PiCamera probe: available_cameras() = %s", available_cams)
 
         if available_cams:
@@ -568,36 +578,12 @@ class CameraService:
             logger.info("PiCamera probe: camera %d found — %s", resolved_num, status)
             return True, status
 
-        # Step 2: fallback — try opening (slower, ensures picamera2 works)
-        resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num, available_cams)
-        if remapped:
-            logger.warning(
-                "PiCamera probe fallback: remapped configured camera_num=%d to actual Num=%d (available=%s)",
-                camera_num,
-                resolved_num,
-                available_nums,
-            )
-        logger.warning(
-            "PiCamera probe: global_camera_info returned empty, trying to open camera %d directly",
-            resolved_num,
+        msg = (
+            "picamera2 可用但 global_camera_info 為空；"
+            "請檢查 CSI 排線/overlay，或若是 USB Arducam 請改用 OpenCV。"
         )
-        source = PiCameraSource(camera_num=resolved_num)
-        try:
-            source.open()
-            frame = source.capture_frame()
-            status = f"{frame.resolution[0]}x{frame.resolution[1]}"
-            if remapped:
-                status = f"{status}, configured={camera_num}, actual={resolved_num}"
-            return True, status
-        except Exception as exc:
-            logger.warning("PiCamera probe failed for camera %d: %s", resolved_num, exc)
-            return False, str(exc)
-        finally:
-            # Always release resources, even if capture_frame() raised
-            try:
-                source.close()
-            except Exception:
-                pass
+        logger.warning("PiCamera probe: %s", msg)
+        return False, msg
 
     def _probe_opencv(self, camera_num: int) -> tuple[bool, str | None]:
         source = OpenCVCameraSource(camera_num=camera_num)
@@ -629,7 +615,20 @@ class CameraService:
             # Prefer Picamera2 for Arducam when available. This covers Raspberry Pi
             # CSI workflows even if platform model detection is imperfect.
             if _is_picamera2_available():
-                resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num)
+                available_cams = PiCameraSource.available_cameras()
+                if not available_cams:
+                    logger.warning(
+                        "Camera %s: picamera2 is importable but no cameras reported; using OpenCV fallback.",
+                        camera_id,
+                    )
+                    return OpenCVCameraSource(
+                        camera_num=camera_num,
+                        width=width,
+                        height=height,
+                        camera_id=camera_id,
+                    )
+
+                resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num, available_cams)
                 if remapped:
                     logger.warning(
                         "Camera %s remapped configured camera_num=%d to actual Num=%d (available=%s)",
