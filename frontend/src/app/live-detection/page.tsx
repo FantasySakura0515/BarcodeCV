@@ -739,10 +739,33 @@ export default function LiveDetectionPage() {
         description="Live Detection View"
         action={
           <div className="flex items-center gap-3">
-            
+            <Select value={selectedCameraId} onValueChange={handleCameraChange}>
+              <SelectTrigger className="w-[220px] bg-black/50 border-cyan-900/50 text-cyan-100">
+                {isLoadingCameras ? (
+                  <div className="flex items-center gap-2">
+                    <ArrowsClockwise className="h-4 w-4 animate-spin" />
+                    載入中...
+                  </div>
+                ) : (
+                  <SelectValue placeholder="選擇鏡頭" />
+                )}
+              </SelectTrigger>
+              <SelectContent className="bg-[#0b0c10] border-cyan-900/50 text-slate-300">
+                {cameras.map((camera) => (
+                  <SelectItem key={camera.id} value={camera.id} className="focus:bg-cyan-950 focus:text-cyan-100">
+                    <div className="flex items-center gap-2">
+                      {camera.sourceScope === "browser" ? <User size={14} /> : <Camera size={14} />}
+                      <span>{camera.label}</span>
+                      {!camera.available && <Badge variant="outline" className="ml-2 text-[10px] border-red-900/50 text-red-500">外部占用</Badge>}
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
             <Button
               onClick={handleToggleScan}
-              disabled={isSwitchingCamera}
+              disabled={isSwitchingCamera || !selectedCameraId}
               variant={isScanningLive ? "destructive" : "default"}
               size="sm"
               className={
