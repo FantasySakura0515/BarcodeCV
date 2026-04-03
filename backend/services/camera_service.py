@@ -516,20 +516,6 @@ class CameraService:
             # detection heuristics. This avoids misrouting CSI cameras to V4L2.
             if _is_picamera2_available():
                 available_cams = PiCameraSource.available_cameras()
-                if not available_cams:
-                    # picamera2 is installed but no CSI camera appears in libcamera.
-                    # This can be CSI stack misconfiguration. Only use OpenCV
-                    # fallback when explicitly enabled (USB/UVC scenarios).
-                    if allow_opencv_fallback or not _is_raspberry_pi():
-                        opencv_ok, opencv_status = self._probe_opencv(camera_num)
-                        if opencv_ok:
-                            return True, f"opencv fallback (no picamera cameras): {opencv_status}"
-                        return False, f"picamera=no cameras; opencv={opencv_status}"
-                    return False, (
-                        "picamera2 可用但未偵測到 CSI 鏡頭；"
-                        "請先檢查 CSI 排線/overlay。若是 USB/UVC，請將 allow_opencv_fallback 設為 true。"
-                    )
-
                 picam_ok, picam_status = self._probe_picamera(camera_num, available_cams)
                 if picam_ok:
                     return True, picam_status
@@ -584,12 +570,23 @@ class CameraService:
             logger.info("PiCamera probe: camera %d found — %s", resolved_num, status)
             return True, status
 
-        msg = (
-            "picamera2 可用但 global_camera_info 為空；"
-            "請檢查 CSI 排線/overlay，或若是 USB Arducam 請改用 OpenCV。"
+        logger.warning(
+            "PiCamera probe: global_camera_info returned empty; trying direct open for camera %d",
+            camera_num,
         )
-        logger.warning("PiCamera probe: %s", msg)
-        return False, msg
+        source = PiCameraSource(camera_num=camera_num)
+        try:
+            source.open()
+            frame = source.capture_frame()
+            return True, f"{frame.resolution[0]}x{frame.resolution[1]}"
+        except Exception as exc:
+            logger.warning("PiCamera probe failed for camera %d: %s", camera_num, exc)
+            return False, str(exc)
+        finally:
+            try:
+                source.close()
+            except Exception:
+                pass
 
     def _probe_opencv(self, camera_num: int) -> tuple[bool, str | None]:
         source = OpenCVCameraSource(camera_num=camera_num)
@@ -622,31 +619,23 @@ class CameraService:
             # CSI workflows even if platform model detection is imperfect.
             if _is_picamera2_available():
                 available_cams = PiCameraSource.available_cameras()
-                if not available_cams:
-                    if allow_opencv_fallback or not _is_raspberry_pi():
+                resolved_num = camera_num
+                if available_cams:
+                    resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num, available_cams)
+                    if remapped:
                         logger.warning(
-                            "Camera %s: picamera2 is importable but no cameras reported; using explicit OpenCV fallback.",
+                            "Camera %s remapped configured camera_num=%d to actual Num=%d (available=%s)",
                             camera_id,
+                            camera_num,
+                            resolved_num,
+                            available_nums,
                         )
-                        return OpenCVCameraSource(
-                            camera_num=camera_num,
-                            width=width,
-                            height=height,
-                            camera_id=camera_id,
-                        )
-                    raise RuntimeError(
-                        "picamera2 可用但未偵測到 CSI 鏡頭；請檢查 CSI 排線/overlay。"
-                        "若是 USB/UVC Arducam，請將 allow_opencv_fallback 設為 true。"
-                    )
-
-                resolved_num, remapped, available_nums = self._resolve_picamera_num(camera_num, available_cams)
-                if remapped:
+                else:
                     logger.warning(
-                        "Camera %s remapped configured camera_num=%d to actual Num=%d (available=%s)",
+                        "Camera %s: picamera2 is importable but camera enumeration returned empty; "
+                        "trying direct open on configured camera_num=%d.",
                         camera_id,
                         camera_num,
-                        resolved_num,
-                        available_nums,
                     )
 
                 if not allow_opencv_fallback:
