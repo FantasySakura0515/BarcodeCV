@@ -225,6 +225,10 @@ print("""
     \u2192 Only one CSI camera is connected; set local.camera_num to the same
        camera as global (0), or connect the second camera.
 
+    If you use CSI Arducam on Raspberry Pi:
+        \u2192 Keep cameras.*.type=arducam and allow_opencv_fallback=false (recommended).
+        \u2192 OpenCV fallback is only for USB/UVC adapters and may fail on CSI-only setups.
+
   If everything above is OK but the API still shows unavailable:
     \u2192 Hit GET http://localhost:8000/api/cameras/debug for runtime context.
 """)

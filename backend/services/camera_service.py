@@ -86,6 +86,14 @@ def _is_picamera2_available() -> bool:
     return importlib.util.find_spec("picamera2") is not None
 
 
+def _rpi_picamera_dependency_message() -> str:
+    return (
+        "Raspberry Pi Arducam 需要 picamera2/libcamera。"
+        "請在 Pi 上執行: sudo apt update && sudo apt install -y python3-picamera2 python3-libcamera libcamera-apps; "
+        "若使用虛擬環境請執行 scripts/fix_venv_pi.sh 重新建立 --system-site-packages 的 .venv。"
+    )
+
+
 class _FallbackCameraSource(CameraSource):
     """Try primary backend first, then fallback backend if open() fails."""
 
@@ -418,9 +426,10 @@ class CameraService:
         camera_num = int(cfg.get("camera_num", 0))
         width = int(cfg.get("width", 1280))
         height = int(cfg.get("height", 720))
+        allow_opencv_fallback = bool(cfg.get("allow_opencv_fallback", False))
 
         try:
-            available, status = self._probe_by_type(source_type, camera_num)
+            available, status = self._probe_by_type(source_type, camera_num, allow_opencv_fallback=allow_opencv_fallback)
         except Exception as exc:
             available = False
             status = str(exc)
@@ -436,19 +445,34 @@ class CameraService:
             status=status,
         )
 
-    def _probe_by_type(self, source_type: str, camera_num: int) -> tuple[bool, str | None]:
+    def _probe_by_type(
+        self,
+        source_type: str,
+        camera_num: int,
+        *,
+        allow_opencv_fallback: bool = False,
+    ) -> tuple[bool, str | None]:
         if source_type == "arducam" and _is_raspberry_pi():
             # Arducam on Raspberry Pi is usually CSI/libcamera (picamera2).
-            # If picamera2 fails, still try OpenCV once for USB fallback setups.
+            # Avoid forcing OpenCV on CSI setups unless explicitly enabled.
+            if not _is_picamera2_available():
+                if allow_opencv_fallback:
+                    opencv_ok, opencv_status = self._probe_opencv(camera_num)
+                    if opencv_ok:
+                        return True, f"opencv fallback: {opencv_status}"
+                return False, _rpi_picamera_dependency_message()
+
             picam_ok, picam_status = self._probe_picamera(camera_num)
             if picam_ok:
                 return True, picam_status
 
-            opencv_ok, opencv_status = self._probe_opencv(camera_num)
-            if opencv_ok:
-                return True, f"opencv fallback: {opencv_status}"
+            if allow_opencv_fallback:
+                opencv_ok, opencv_status = self._probe_opencv(camera_num)
+                if opencv_ok:
+                    return True, f"opencv fallback: {opencv_status}"
+                return False, f"picamera={picam_status}; opencv={opencv_status}"
 
-            return False, f"picamera={picam_status}; opencv={opencv_status}"
+            return False, f"picamera={picam_status}"
 
         if source_type == "opencv" or source_type == "arducam":
             return self._probe_opencv(camera_num)
@@ -517,15 +541,31 @@ class CameraService:
         camera_num = int(cfg.get("camera_num", 0))
         width = int(cfg.get("width", 1280))
         height = int(cfg.get("height", 720))
+        allow_opencv_fallback = bool(cfg.get("allow_opencv_fallback", False))
 
         if source_type == "arducam" and _is_raspberry_pi():
             # On Raspberry Pi, prefer picamera2/libcamera for Arducam CSI sensors.
-            # Keep OpenCV as runtime fallback for USB adapter scenarios.
+            # OpenCV fallback is opt-in for USB adapter scenarios.
             if not _is_picamera2_available():
-                logger.warning(
-                    "Camera %s is configured as arducam on Raspberry Pi but picamera2 is unavailable; "
-                    "will attempt OpenCV fallback after Picamera2 fails.",
-                    camera_id,
+                if allow_opencv_fallback:
+                    logger.warning(
+                        "Camera %s uses arducam on Raspberry Pi without picamera2; using explicit OpenCV fallback.",
+                        camera_id,
+                    )
+                    return OpenCVCameraSource(
+                        camera_num=camera_num,
+                        width=width,
+                        height=height,
+                        camera_id=camera_id,
+                    )
+                raise RuntimeError(_rpi_picamera_dependency_message())
+
+            if not allow_opencv_fallback:
+                return PiCameraSource(
+                    camera_num=camera_num,
+                    width=width,
+                    height=height,
+                    camera_id=camera_id,
                 )
 
             return _FallbackCameraSource(

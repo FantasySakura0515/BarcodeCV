@@ -349,6 +349,18 @@ def debug_cameras() -> dict:
     Useful on Raspberry Pi to see why cameras appear as unavailable.
     Call via browser or curl:  GET /api/cameras/debug
     """
+    diagnostics = PiCameraSource.diagnose()
+    suggested_fixes: list[str] = []
+
+    if diagnostics.get("picamera2_import_error"):
+        suggested_fixes.append(
+            "sudo apt update && sudo apt install -y python3-picamera2 python3-libcamera libcamera-apps v4l-utils"
+        )
+        suggested_fixes.append("bash scripts/fix_venv_pi.sh")
+
+    if diagnostics.get("global_camera_info_error") and not diagnostics.get("global_camera_info"):
+        suggested_fixes.append("libcamera-hello --list-cameras")
+
     return {
         "configured_cameras": list(getattr(app.state, "config", {}).get("cameras", {}).keys()),
         "probe_results": [
@@ -361,7 +373,8 @@ def debug_cameras() -> dict:
             }
             for item in get_camera_service().list_cameras()
         ],
-        "system_diagnostics": PiCameraSource.diagnose(),
+        "system_diagnostics": diagnostics,
+        "suggested_fixes": suggested_fixes,
     }
 
 

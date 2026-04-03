@@ -12,12 +12,14 @@ cameras:
     camera_num: 0
     width: 1920
     height: 1080
+    allow_opencv_fallback: false
     role: "detection"
   local:
     type: "arducam"
     camera_num: 1
     width: 1920
     height: 1080
+    allow_opencv_fallback: false
     role: "decoding"
 
 # --- Scanner mode ---
