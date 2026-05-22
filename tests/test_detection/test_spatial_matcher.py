@@ -3,15 +3,15 @@
 import numpy as np
 import pytest
 
-from src.detection.box_detector import BoxDetectionResult
-from src.detection.spatial_matcher import (
+from backend.detection.box_detector import BoxDetectionResult
+from backend.detection.spatial_matcher import (
     SpatialMatcher,
     ScanSummary,
     MatchResult,
     _compute_iou,
     _dm_center_in_box,
 )
-from src.decoding.direct_scanner import ScanResult
+from backend.decoding.direct_scanner import ScanResult
 
 
 # ---------------------------------------------------------------------------

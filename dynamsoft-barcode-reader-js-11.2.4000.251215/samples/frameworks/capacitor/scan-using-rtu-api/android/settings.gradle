@@ -1,0 +1,8 @@
+include ':app'
+def capacitorCordovaPluginsDir = new File(rootDir, 'capacitor-cordova-android-plugins')
+if (capacitorCordovaPluginsDir.exists()) {
+	include ':capacitor-cordova-android-plugins'
+	project(':capacitor-cordova-android-plugins').projectDir = capacitorCordovaPluginsDir
+}
+
+apply from: 'capacitor.settings.gradle'

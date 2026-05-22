@@ -2,8 +2,8 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from src.decoding.decoder import DecodeResult
-from src.decoding.fallback_decoder import FallbackDecoder
+from backend.decoding.decoder import DecodeResult
+from backend.decoding.fallback_decoder import FallbackDecoder
 
 
 class TestFallbackDecoder:

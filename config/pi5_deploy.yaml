@@ -9,5 +9,16 @@ detection:
 
 decoding:
   pylibdmtx:
-    timeout_ms: 2000
-    shrink: 2
+    timeout_ms: 3000
+    fast_timeout_ms: 3000
+    shrink: 1
+
+box_detection:
+  min_area: 1200
+  max_area: 800000
+  canny_threshold1: 30
+  canny_threshold2: 100
+  morph_kernel_size: 7
+  blur_kernel_size: 5
+  aspect_ratio_min: 0.5
+  aspect_ratio_max: 2.6

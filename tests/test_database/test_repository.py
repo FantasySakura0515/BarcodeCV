@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from src.database.repository import ScanRecord, ScanRepository
+from backend.database.repository import ScanRecord, ScanRepository
 
 
 class TestScanRepository:
@@ -21,7 +21,8 @@ class TestScanRepository:
             decode_success=True,
             decoder_used="zxing-cpp",
             decode_time_ms=25.5,
-            image_source="local",
+            image_source="main",
+            frame_image_path="./output/images/main.jpg",
         )
         row_id = repo.insert_scan(record)
         assert row_id is not None
@@ -30,6 +31,8 @@ class TestScanRepository:
         assert len(scans) == 1
         assert scans[0].decoded_content == "HELLO123"
         assert scans[0].decode_success is True
+        assert scans[0].image_source == "main"
+        assert scans[0].frame_image_path == "./output/images/main.jpg"
 
     def test_search_by_content(self, in_memory_db):
         repo = ScanRepository(in_memory_db)

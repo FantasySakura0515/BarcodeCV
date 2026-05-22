@@ -2,20 +2,26 @@
 numpy>=1.24.0
 opencv-python-headless>=4.8.0
 Pillow>=10.0.0
+pypdfium2>=4.30.0
 
-# YOLO Detection
+# Neural network detection (YOLO) + ONNX inference (CRNN recognizer)
+# Replaces pylibdmtx and zxing-cpp for production inference.
 ultralytics>=8.3.0
-
-# DataMatrix Decoding
-pylibdmtx>=0.1.10
-zxing-cpp>=2.2.0
+onnxruntime>=1.17.0
 
 # Configuration
 PyYAML>=6.0
 
-# Training (install on training machine only)
+# API
+fastapi>=0.115.0
+uvicorn>=0.32.0
+python-multipart>=0.0.12
+
+# Training (install on training machine only — NOT required for inference)
+# torch>=2.2.0
+# torchvision>=0.17.0
 # albumentations>=1.3.0
-# treepoem>=3.0.0
+# pylibdmtx>=0.1.10   # only for synthetic training-data generation (encode, not decode)
 
 # Testing
 pytest>=7.4.0
